@@ -10,7 +10,7 @@ from .config import NETWORK_RETRY_SECONDS
 from .db import (
     count_movies, create_job, find_probable_title_duplicate, get_search_state,
     get_latest_job, get_latest_source_query, movie_exists, save_search_state,
-    update_job, upsert_movie,
+    update_job, upsert_movie, upsert_movie_with_target_guard,
 )
 from .events import events
 from .language_profiles import (
@@ -320,6 +320,8 @@ class DiscoveryController:
                 self.stats["rejected_not_movie"] += 1
             elif result == "DUPLICATE":
                 self.stats["duplicates_skipped"] += 1
+            elif result == "TARGET_REACHED":
+                self.stats["accepted"] = count_movies(self.language, ACCEPTED_STATUSES)
 
     def _evaluate(self, item, query, min_seconds):
         vid = item["id"]
@@ -471,7 +473,19 @@ class DiscoveryController:
                             break
                         self._wait_if_paused()
                         movie, result = self._evaluate(item, query, min_seconds)
-                        upsert_movie(movie)
+
+                        if result == "ACCEPTED":
+                            # Atomically re-checks accepted count against target at write
+                            # time, so a concurrent writer (another thread or process)
+                            # can never push the accepted total past target.
+                            stored_status = upsert_movie_with_target_guard(
+                                movie, ACCEPTED_STATUSES, self.target
+                            )
+                            if stored_status != "ACCEPTED":
+                                result = "TARGET_REACHED"
+                            movie = {**movie, "status": stored_status}
+                        else:
+                            upsert_movie(movie)
                         progressed = True
 
                         self._record_result(result)

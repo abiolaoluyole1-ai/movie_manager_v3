@@ -182,6 +182,77 @@ def upsert_movie(movie):
         ))
 
 
+def upsert_movie_with_target_guard(movie, accepted_statuses, target):
+    """Upsert a movie, atomically re-checking the accepted count if it is
+    about to become ACCEPTED.
+
+    The count-check and the write happen inside one SQLite write
+    transaction (BEGIN IMMEDIATE), so the accepted count can never be
+    pushed past target even if another writer -- another thread in this
+    process, or a separate process such as the CLI -- is racing to accept
+    a movie for the same language at the same moment. If the target is
+    already satisfied at write time, the candidate is stored as
+    DISCOVERED (not accepted, not rejected as bad content) instead.
+
+    Returns the status actually stored.
+    """
+    now = now_iso()
+    requested_status = movie.get("status", "DISCOVERED")
+    final_status = requested_status
+    language = movie["language"]
+    with _lock, connect() as conn:
+        conn.isolation_level = None
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            if requested_status == "ACCEPTED":
+                placeholders = ",".join("?" for _ in accepted_statuses)
+                current = conn.execute(
+                    f"SELECT COUNT(*) FROM movies WHERE language=? AND status IN ({placeholders})",
+                    [language, *accepted_statuses]
+                ).fetchone()[0]
+                if current >= target:
+                    final_status = "DISCOVERED"
+
+            conn.execute("""
+            INSERT INTO movies(
+                language,video_id,title,normalised_title,description,
+                channel_id,channel_title,published_at,default_audio_language,default_language,duration_seconds,
+                thumbnail_url,youtube_url,embeddable,licence,status,
+                rejection_reason,download_url,download_status,source_query,
+                created_at,updated_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(language,video_id) DO UPDATE SET
+                title=excluded.title,
+                normalised_title=excluded.normalised_title,
+                description=excluded.description,
+                channel_id=excluded.channel_id,
+                channel_title=excluded.channel_title,
+                published_at=excluded.published_at,
+                default_audio_language=excluded.default_audio_language,
+                default_language=excluded.default_language,
+                duration_seconds=excluded.duration_seconds,
+                thumbnail_url=excluded.thumbnail_url,
+                embeddable=excluded.embeddable,
+                licence=excluded.licence,
+                source_query=excluded.source_query,
+                updated_at=excluded.updated_at
+            """, (
+                movie["language"], movie["video_id"], movie["title"], movie.get("normalised_title"),
+                movie.get("description"), movie.get("channel_id"), movie.get("channel_title"),
+                movie.get("published_at"), movie.get("default_audio_language"), movie.get("default_language"),
+                int(movie.get("duration_seconds") or 0),
+                movie.get("thumbnail_url"), movie["youtube_url"], int(bool(movie.get("embeddable"))),
+                movie.get("licence"), final_status, movie.get("rejection_reason"),
+                movie.get("download_url"), movie.get("download_status", "NOT_READY"),
+                movie.get("source_query"), now, now
+            ))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+    return final_status
+
+
 def movie_exists(language, video_id):
     with connect() as conn:
         return conn.execute(

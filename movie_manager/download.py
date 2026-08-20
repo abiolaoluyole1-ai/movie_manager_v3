@@ -23,6 +23,7 @@ class DownloadController:
         self.language = "yoruba"
         self.current_movie_id = None
         self.message = ""
+        self.network_wait = False
 
     def snapshot(self):
         with self._lock:
@@ -31,6 +32,7 @@ class DownloadController:
                 "language": self.language,
                 "current_movie_id": self.current_movie_id,
                 "message": self.message,
+                "network_wait": self.network_wait,
             }
 
     def start(self, language="yoruba"):
@@ -46,6 +48,7 @@ class DownloadController:
             self._pause.clear()
             self.status = "RUNNING"
             self.message = "Download worker started."
+            self.network_wait = False
             self._thread = threading.Thread(target=self._run, daemon=True)
             self._thread.start()
             events.emit("download_status", self.snapshot())
@@ -70,6 +73,7 @@ class DownloadController:
         with self._lock:
             self.status = "STOPPING"
             self.message = "Stopping download worker..."
+            self.network_wait = False
         events.emit("download_status", self.snapshot())
 
     def _wait_if_paused(self):
@@ -110,6 +114,12 @@ class DownloadController:
                         if r.status_code in {408, 429, 500, 502, 503, 504}:
                             raise requests.RequestException(f"Temporary source error {r.status_code}")
                         raise RuntimeError(f"Download source returned HTTP {r.status_code}")
+
+                    with self._lock:
+                        recovered = self.network_wait
+                        self.network_wait = False
+                    if recovered:
+                        events.emit("download_status", self.snapshot())
 
                     if existing > 0 and r.status_code == 200:
                         existing = 0
@@ -180,10 +190,12 @@ class DownloadController:
                 )
                 with self._lock:
                     self.message = f"Network/source interrupted. Retrying automatically in {delay}s."
+                    self.network_wait = True
                 events.emit("network_wait", {
                     "scope": "download", "movie_id": movie["id"],
                     "delay": delay, "error": str(exc),
                 })
+                events.emit("download_status", self.snapshot())
                 for _ in range(delay * 4):
                     if self._stop.is_set():
                         return
@@ -222,9 +234,15 @@ class DownloadController:
                 update_download(movie["id"], download_status="QUEUED", status="QUEUED")
                 events.emit("download_status", self.snapshot())
                 self._download_one(movie)
+        except Exception as exc:
+            with self._lock:
+                self.status = "ERROR"
+                self.message = str(exc)
+            events.emit("error", {"scope": "download", "message": str(exc)})
         finally:
-            if self._stop.is_set():
-                with self._lock:
+            with self._lock:
+                self.network_wait = False
+                if self._stop.is_set() and self.status != "ERROR":
                     self.status = "STOPPED"
                     self.message = "Download worker stopped safely."
-                events.emit("download_status", self.snapshot())
+            events.emit("download_status", self.snapshot())

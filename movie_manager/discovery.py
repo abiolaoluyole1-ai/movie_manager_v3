@@ -65,6 +65,7 @@ class DiscoveryController:
         self.current_query = ""
         self.message = ""
         self.job_id = None
+        self.network_wait = False
 
     def _fresh_stats(self):
         return {
@@ -87,6 +88,7 @@ class DiscoveryController:
                 "current_query": self.current_query,
                 "message": self.message,
                 "stats": dict(self.stats),
+                "network_wait": self.network_wait,
             }
 
     def _job_stats(self):
@@ -116,6 +118,7 @@ class DiscoveryController:
             )
             self.message = job.get("message") or "Discovery completed."
             self.job_id = None
+            self.network_wait = False
             return self.snapshot()
 
     def start(self, language: str, target: int):
@@ -136,6 +139,7 @@ class DiscoveryController:
             self._pause.clear()
             self._stop.clear()
             self.stats = self._fresh_stats()
+            self.network_wait = False
             accepted_now = count_movies(language, ACCEPTED_STATUSES)
             if accepted_now >= self.target:
                 self.restore_latest(language)
@@ -183,6 +187,7 @@ class DiscoveryController:
             if self.status not in {"IDLE", "COMPLETED"}:
                 self.status = "STOPPING"
                 self.message = "Stopping safely..."
+                self.network_wait = False
                 events.emit("discovery_status", self.snapshot())
 
     def _wait_if_paused(self):
@@ -197,6 +202,10 @@ class DiscoveryController:
                 response = requests.get(url, params=params, timeout=35)
                 with self._lock:
                     self.stats["api_requests"] += 1
+                    recovered = self.network_wait
+                    self.network_wait = False
+                if recovered:
+                    events.emit("discovery_status", self.snapshot())
                 if response.status_code == 200:
                     return response
                 if response.status_code in TEMPORARY_API_STATUSES:
@@ -213,7 +222,9 @@ class DiscoveryController:
                 with self._lock:
                     self.stats["network_retries"] += 1
                     self.message = f"Network/API unavailable. Retrying automatically in {delay}s..."
+                    self.network_wait = True
                 events.emit("network_wait", {"scope": "discovery", "delay": delay, "error": str(exc)})
+                events.emit("discovery_status", self.snapshot())
                 for _ in range(delay * 4):
                     if self._stop.is_set():
                         return None
@@ -503,6 +514,8 @@ class DiscoveryController:
                 self.message = str(exc)
             events.emit("error", {"scope": "discovery", "message": str(exc)})
         finally:
+            with self._lock:
+                self.network_wait = False
             if self.job_id:
                 update_job(self.job_id, status=self.status, stats=self._job_stats(), message=self.message)
             events.emit("discovery_status", self.snapshot())

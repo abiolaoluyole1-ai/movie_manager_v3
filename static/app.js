@@ -1,14 +1,137 @@
 const state={language:"yoruba",target:30,movies:[],runtime:null,counts:{},mode:"discover",selection:new Set()};
 const $=id=>document.getElementById(id);const els={};
-function cache(){["languageSelect","targetInput","modeSelect","startBtn","pauseBtn","resumeBtn","stopBtn","statTarget","statAccepted","statDownloaded","statRemaining","discoveryStatus","downloadStatus","discoveryBar","discoveryProgressText","discoveryPercent","scannedCount","underCount","notMovieCount","wrongLanguageCount","duplicateCount","apiCount","retryCount","currentQuery","discoveryMessage","recentMovies","allMovies","activityLog","downloadSummary","movieSearch","movieStatusFilter","refreshMovies","downloadMovies","downloadStart","downloadPause","downloadResume","downloadStop","minimumDuration","maintainTarget","downloadRoot","chooseFolder","saveSettings","apiConfigured","movieModal","modalBody","toastWrap","networkDot","networkText","clearActivity","moviesTitle","selectPageBtn","selectAllFilteredBtn","clearSelectionBtn","bulkCount","bulkActions","bulkRemoveReplace","bulkWrongLanguage","bulkRestore"].forEach(id=>els[id]=$(id));}
+function cache(){["languageSelect","targetInput","modeSelect","primaryActionBtn","secondaryStopBtn","statTarget","statAccepted","statDownloaded","statRemaining","discoveryStatus","downloadStatus","discoveryBar","discoveryProgressText","discoveryPercent","scannedCount","underCount","notMovieCount","wrongLanguageCount","duplicateCount","apiCount","retryCount","currentQuery","discoveryMessage","recentMovies","allMovies","activityLog","downloadSummary","movieSearch","movieStatusFilter","refreshMovies","downloadMovies","downloadPrimaryBtn","downloadStopBtn","minimumDuration","maintainTarget","downloadRoot","chooseFolder","saveSettings","apiConfigured","movieModal","modalBody","toastWrap","networkDot","networkText","clearActivity","moviesTitle","selectPageBtn","selectAllFilteredBtn","clearSelectionBtn","bulkCount","bulkActions","bulkRemoveReplace","bulkWrongLanguage","bulkRestore"].forEach(id=>els[id]=$(id));}
 async function api(url,options={}){const opts={headers:{"Content-Type":"application/json"},...options};const r=await fetch(url,opts);let b={};try{b=await r.json()}catch{}if(!r.ok||b.ok===false)throw new Error(b.error||`Request failed (${r.status})`);return b}
 function esc(v=""){return String(v).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[c]))}
 function toast(m,t=""){const n=document.createElement("div");n.className=`toast ${t}`;n.textContent=m;els.toastWrap.appendChild(n);setTimeout(()=>n.remove(),4200)}
 function addLog(m,k=""){const n=document.createElement("div");n.className=`log-line ${k}`;const t=new Date().toLocaleTimeString([], {hour:"2-digit",minute:"2-digit",second:"2-digit"});n.innerHTML=`<span class="log-time">${t}</span><span>${esc(m)}</span>`;els.activityLog.prepend(n);while(els.activityLog.children.length>80)els.activityLog.lastChild.remove()}
 function fmtBytes(n){if(n==null)return"—";let v=Number(n),u=["B","KB","MB","GB","TB"],i=0;while(v>=1024&&i<u.length-1){v/=1024;i++}return`${v.toFixed(i?1:0)} ${u[i]}`}
 function fmtTime(s){if(s==null||!isFinite(s))return"—";s=Math.max(0,Math.round(s));if(s<60)return`${s}s`;const m=Math.floor(s/60),x=s%60;if(m<60)return`${m}m ${x}s`;return`${Math.floor(m/60)}h ${m%60}m`}
+const PHASE_PRIORITY=["error","waiting-network","running","paused","stopping","continue","completed","waiting-source","idle"];
+const DASHBOARD_PHASE_LABELS={
+  idle:{label:"Start",cls:"primary",disabled:false},
+  running:{label:"Pause",cls:"primary",disabled:false},
+  "waiting-network":{label:"Waiting for network…",cls:"",disabled:true},
+  paused:{label:"Resume",cls:"primary",disabled:false},
+  stopping:{label:"Stopping…",cls:"",disabled:true},
+  completed:{label:"✓ Completed",cls:"",disabled:true},
+  continue:{label:"Continue",cls:"primary",disabled:false},
+  error:{label:"Retry",cls:"primary",disabled:false},
+  "waiting-source":{label:"No downloads queued",cls:"",disabled:true},
+};
+const DOWNLOAD_PHASE_LABELS={
+  idle:{label:"Start downloads",cls:"primary",disabled:false},
+  running:{label:"Pause",cls:"primary",disabled:false},
+  "waiting-network":{label:"Waiting for network…",cls:"",disabled:true},
+  paused:{label:"Resume",cls:"primary",disabled:false},
+  stopping:{label:"Stopping…",cls:"",disabled:true},
+  error:{label:"Retry",cls:"primary",disabled:false},
+  "waiting-source":{label:"No downloads queued",cls:"",disabled:true},
+};
+function deriveDiscoveryPhase(){
+  const d=state.runtime?.discovery||{},status=d.status||"IDLE";
+  const target=Math.max(1,Number(els.targetInput?.value||state.target||0)),accepted=Number(state.counts.accepted||0);
+  if(status==="ERROR")return"error";
+  if(status==="RUNNING")return d.network_wait?"waiting-network":"running";
+  if(status==="PAUSED")return"paused";
+  if(status==="STOPPING")return"stopping";
+  if(status==="COMPLETED")return target>accepted?"continue":"completed";
+  return"idle"
+}
+function deriveDownloadPhase(){
+  const dl=state.runtime?.downloads||{},status=dl.status||"IDLE";
+  if(status==="ERROR")return"error";
+  if(status==="RUNNING")return dl.network_wait?"waiting-network":"running";
+  if(status==="PAUSED")return"paused";
+  if(status==="STOPPING")return"stopping";
+  if(status==="WAITING")return"waiting-source";
+  return"idle"
+}
+function combineDashboardPhase(){
+  const mode=els.modeSelect?.value||state.mode||"discover";
+  if(mode==="discover")return deriveDiscoveryPhase();
+  if(mode==="download")return deriveDownloadPhase();
+  const dPhase=deriveDiscoveryPhase(),dlPhase=deriveDownloadPhase();
+  return PHASE_PRIORITY.find(p=>p===dPhase||p===dlPhase)||"idle"
+}
+function applyButtonPhase(btn,info){btn.textContent=info.label;btn.disabled=!!info.disabled;btn.classList.toggle("primary",info.cls==="primary")}
+function renderDashboardControls(){
+  const phase=combineDashboardPhase(),info=DASHBOARD_PHASE_LABELS[phase]||DASHBOARD_PHASE_LABELS.idle;
+  applyButtonPhase(els.primaryActionBtn,info);
+  const showStop=["running","waiting-network","paused","stopping","waiting-source"].includes(phase);
+  els.secondaryStopBtn.classList.toggle("hidden",!showStop);
+  els.secondaryStopBtn.disabled=phase==="stopping";
+  const locked=["running","paused","waiting-network","stopping"].includes(phase);
+  els.languageSelect.disabled=locked;
+  els.modeSelect.disabled=locked;
+  els.targetInput.disabled=phase==="running"||phase==="waiting-network"||phase==="stopping";
+}
+function renderDownloadControls(){
+  const phase=deriveDownloadPhase(),info=DOWNLOAD_PHASE_LABELS[phase]||DOWNLOAD_PHASE_LABELS.idle;
+  applyButtonPhase(els.downloadPrimaryBtn,info);
+  const showStop=["running","waiting-network","paused","stopping","waiting-source"].includes(phase);
+  els.downloadStopBtn.classList.toggle("hidden",!showStop);
+  els.downloadStopBtn.disabled=phase==="stopping";
+}
+async function dashboardPrimaryAction(){
+  const mode=els.modeSelect.value,phase=combineDashboardPhase(),dPhase=deriveDiscoveryPhase(),dlPhase=deriveDownloadPhase();
+  const target=Math.max(1,Number(els.targetInput.value||state.target||30));
+  try{
+    if(phase==="idle"){await startAction();return}
+    if(phase==="continue"){
+      state.target=target;
+      await api("/api/discovery/start",{method:"POST",body:JSON.stringify({language:state.language,target})});
+      addLog(`Continuing discovery toward new target: ${target}.`,"log-good");
+      await refresh();return
+    }
+    if(phase==="error"){
+      const tasks=[];
+      if((mode==="discover"||mode==="both")&&dPhase==="error")tasks.push(api("/api/discovery/start",{method:"POST",body:JSON.stringify({language:state.language,target})}));
+      if((mode==="download"||mode==="both")&&dlPhase==="error")tasks.push(api("/api/downloads/start",{method:"POST",body:JSON.stringify({language:state.language})}));
+      await Promise.all(tasks);
+      addLog("Retrying after error.","log-good");
+      await refresh();return
+    }
+    if(phase==="running"){
+      const tasks=[];
+      if(mode==="discover"||mode==="both")tasks.push(api("/api/discovery/pause",{method:"POST"}));
+      if(mode==="download"||mode==="both")tasks.push(api("/api/downloads/pause",{method:"POST"}));
+      await Promise.all(tasks);await refresh();return
+    }
+    if(phase==="paused"){
+      const tasks=[];
+      if(mode==="discover"||mode==="both"){
+        state.target=target;
+        tasks.push(api("/api/discovery/start",{method:"POST",body:JSON.stringify({language:state.language,target})}));
+      }
+      if(mode==="download"||mode==="both")tasks.push(api("/api/downloads/resume",{method:"POST"}));
+      await Promise.all(tasks);
+      addLog("Resumed.","log-good");
+      await refresh();return
+    }
+  }catch(e){toast(e.message,"error")}
+}
+async function dashboardStopAction(){
+  const mode=els.modeSelect.value;
+  try{
+    const tasks=[];
+    if(mode==="discover"||mode==="both")tasks.push(api("/api/discovery/stop",{method:"POST"}));
+    if(mode==="download"||mode==="both")tasks.push(api("/api/downloads/stop",{method:"POST"}));
+    await Promise.all(tasks);await refresh()
+  }catch(e){toast(e.message,"error")}
+}
+async function downloadPrimaryAction(){
+  const phase=deriveDownloadPhase();
+  try{
+    if(phase==="idle"||phase==="error"){await api("/api/downloads/start",{method:"POST",body:JSON.stringify({language:state.language})});addLog(phase==="error"?"Retrying downloads after error.":"Download worker started.","log-good")}
+    else if(phase==="running"){await api("/api/downloads/pause",{method:"POST"})}
+    else if(phase==="paused"){await api("/api/downloads/resume",{method:"POST"})}
+    await refresh()
+  }catch(e){toast(e.message,"error")}
+}
+async function downloadStopAction(){try{await api("/api/downloads/stop",{method:"POST"});await refresh()}catch(e){toast(e.message,"error")}}
 function renderLanguages(l){els.languageSelect.innerHTML="";Object.entries(l).forEach(([k,p])=>{const o=document.createElement("option");o.value=k;o.textContent=p.enabled?p.label:`${p.label} — later`;o.disabled=!p.enabled;els.languageSelect.appendChild(o)});els.languageSelect.value=state.language}
-function renderStats(rt){const target=Number(state.target||0),accepted=Number(state.counts.accepted||0),downloaded=Number(state.counts.downloaded||0),rem=Math.max(target-accepted,0);els.statTarget.textContent=target.toLocaleString();els.statAccepted.textContent=accepted.toLocaleString();els.statDownloaded.textContent=downloaded.toLocaleString();els.statRemaining.textContent=rem.toLocaleString();const pct=target?Math.min(100,accepted/target*100):0;els.discoveryBar.style.width=`${pct}%`;els.discoveryProgressText.textContent=`${accepted.toLocaleString()} / ${target.toLocaleString()}`;els.discoveryPercent.textContent=`${pct.toFixed(1)}%`;const d=rt?.discovery||{},s=d.stats||{};els.discoveryStatus.textContent=d.status||"IDLE";els.scannedCount.textContent=Number(s.candidates_scanned||0).toLocaleString();els.underCount.textContent=Number(s.rejected_under_duration||0).toLocaleString();els.notMovieCount.textContent=Number(s.rejected_not_movie||0).toLocaleString();els.wrongLanguageCount.textContent=Number(s.rejected_wrong_language||0).toLocaleString();els.duplicateCount.textContent=Number(s.duplicates_skipped||0).toLocaleString();els.apiCount.textContent=Number(s.api_requests||0).toLocaleString();els.retryCount.textContent=Number(s.network_retries||0).toLocaleString();els.currentQuery.textContent=d.current_query||"Waiting to start";els.discoveryMessage.textContent=d.message||"Your progress is saved in SQLite.";const dl=rt?.downloads||{};els.downloadStatus.textContent=dl.status||"IDLE";const dc=state.counts.download||{};els.downloadSummary.textContent=`${dl.message||"Download worker idle."}  Ready ${Number(dc.READY||0)} • Downloading ${Number(dc.DOWNLOADING||0)} • Waiting network ${Number(dc.WAITING_NETWORK||0)} • Completed ${Number(dc.DOWNLOADED||0)} • Failed ${Number(dc.FAILED||0)}`;}
+function renderStats(rt){const target=Number(state.target||0),accepted=Number(state.counts.accepted||0),downloaded=Number(state.counts.downloaded||0),rem=Math.max(target-accepted,0);els.statTarget.textContent=target.toLocaleString();els.statAccepted.textContent=accepted.toLocaleString();els.statDownloaded.textContent=downloaded.toLocaleString();els.statRemaining.textContent=rem.toLocaleString();const pct=target?Math.min(100,accepted/target*100):0;els.discoveryBar.style.width=`${pct}%`;els.discoveryProgressText.textContent=`${accepted.toLocaleString()} / ${target.toLocaleString()}`;els.discoveryPercent.textContent=`${pct.toFixed(1)}%`;const d=rt?.discovery||{},s=d.stats||{};els.discoveryStatus.textContent=d.status||"IDLE";els.scannedCount.textContent=Number(s.candidates_scanned||0).toLocaleString();els.underCount.textContent=Number(s.rejected_under_duration||0).toLocaleString();els.notMovieCount.textContent=Number(s.rejected_not_movie||0).toLocaleString();els.wrongLanguageCount.textContent=Number(s.rejected_wrong_language||0).toLocaleString();els.duplicateCount.textContent=Number(s.duplicates_skipped||0).toLocaleString();els.apiCount.textContent=Number(s.api_requests||0).toLocaleString();els.retryCount.textContent=Number(s.network_retries||0).toLocaleString();els.currentQuery.textContent=d.current_query||"Waiting to start";els.discoveryMessage.textContent=d.message||"Your progress is saved in SQLite.";const dl=rt?.downloads||{};els.downloadStatus.textContent=dl.status||"IDLE";const dc=state.counts.download||{};els.downloadSummary.textContent=`${dl.message||"Download worker idle."}  Ready ${Number(dc.READY||0)} • Downloading ${Number(dc.DOWNLOADING||0)} • Waiting network ${Number(dc.WAITING_NETWORK||0)} • Completed ${Number(dc.DOWNLOADED||0)} • Failed ${Number(dc.FAILED||0)}`;renderDashboardControls();renderDownloadControls();}
 function card(m,selectable){const n=document.createElement("article");n.className="movie-card";n.dataset.cardId=m.id;const st=m.status||"DISCOVERED";const checked=state.selection.has(Number(m.id));if(selectable&&checked)n.classList.add("selected");const checkbox=selectable?`<div class="card-select"><input type="checkbox" data-select="${m.id}" ${checked?"checked":""}></div>`:"";n.innerHTML=`${checkbox}<div class="thumb-wrap" data-open="${m.id}">${m.thumbnail_url?`<img loading="lazy" src="${esc(m.thumbnail_url)}" alt="">`:""}<div class="play-badge"><span>▶</span></div><span class="duration-badge">${esc(m.duration_label||"")}</span></div><div class="movie-body"><h4 title="${esc(m.title)}">${esc(m.title)}</h4><div class="movie-meta">${esc(m.channel_title||"Unknown channel")}<br>${m.published_at?new Date(m.published_at).getFullYear():"Unknown year"} • ${esc(st)}${m.downloadable?" • Local source ready":""}</div><div class="movie-actions"><button class="mini-btn" data-open="${m.id}">Details</button><button class="mini-btn" data-youtube="${esc(m.youtube_url)}">YouTube</button>${st==="REJECTED"?`<button class="mini-btn red" data-restore="${m.id}">Restore</button>`:`<button class="mini-btn red" data-reject="${m.id}">Remove & Replace</button><button class="mini-btn red" data-reject-wrong-language="${m.id}">Wrong language</button>`}</div></div>`;return n}
 function renderGrid(c,ms,selectable){c.innerHTML="";if(!ms.length){c.innerHTML=`<div class="empty">No movies here yet.</div>`;return}ms.forEach(m=>c.appendChild(card(m,selectable)))}
 async function loadMovies(){const status=els.movieStatusFilter?.value||"ALL",search=els.movieSearch?.value||"";const rows=await api(`/api/movies?language=${encodeURIComponent(state.language)}&status=${encodeURIComponent(status)}&search=${encodeURIComponent(search)}&limit=120`);state.movies=rows;renderGrid(els.allMovies,rows,true);renderGrid(els.recentMovies,rows.filter(m=>m.status!=="REJECTED").slice(0,8));renderGrid(els.downloadMovies,rows.filter(m=>m.downloadable||["QUEUED","DOWNLOADING","DOWNLOADED"].includes(m.download_status)));els.moviesTitle.textContent=`${state.language[0].toUpperCase()+state.language.slice(1)} Movies`;updateSelectionUI()}
@@ -25,6 +148,6 @@ async function showMovie(id){let m=state.movies.find(x=>Number(x.id)===Number(id
 async function saveSource(id){await api(`/api/movies/${id}/download-source`,{method:"POST",body:JSON.stringify({download_url:$("directSourceInput").value})});toast("Local download source saved.");await loadMovies();await refresh()}
 function closeModal(){els.movieModal.classList.add("hidden");els.modalBody.innerHTML=""}
 function network(){const on=navigator.onLine;els.networkDot.className=`dot ${on?"online":"offline"}`;els.networkText.textContent=on?"Browser online":"Browser offline"}
-function bind(){document.querySelectorAll(".nav-item").forEach(b=>b.addEventListener("click",()=>{document.querySelectorAll(".nav-item").forEach(x=>x.classList.remove("active"));b.classList.add("active");document.querySelectorAll(".view").forEach(x=>x.classList.remove("active"));$(`view-${b.dataset.view}`).classList.add("active");$("pageTitle").textContent=b.textContent.trim()}));document.querySelectorAll("[data-go]").forEach(b=>b.addEventListener("click",()=>document.querySelector(`.nav-item[data-view="${b.dataset.go}"]`).click()));els.languageSelect.addEventListener("change",async()=>{state.language=els.languageSelect.value;clearSelection();await api("/api/settings",{method:"POST",body:JSON.stringify({active_language:state.language})});await bootstrap()});els.selectPageBtn.addEventListener("click",selectPage);els.selectAllFilteredBtn.addEventListener("click",()=>selectAllFiltered().catch(e=>toast(e.message,"error")));els.clearSelectionBtn.addEventListener("click",clearSelection);els.bulkRemoveReplace.addEventListener("click",()=>bulkAction("remove"));els.bulkWrongLanguage.addEventListener("click",()=>bulkAction("wrong-language"));els.bulkRestore.addEventListener("click",()=>bulkAction("restore"));document.body.addEventListener("change",e=>{const cb=e.target.closest("[data-select]");if(cb)toggleSelect(cb.dataset.select,cb.checked)});els.startBtn.addEventListener("click",()=>startAction().catch(e=>toast(e.message,"error")));els.pauseBtn.addEventListener("click",async()=>{try{await api("/api/discovery/pause",{method:"POST"});if(els.modeSelect.value==="both")await api("/api/downloads/pause",{method:"POST"})}catch(e){toast(e.message,"error")}});els.resumeBtn.addEventListener("click",async()=>{try{await api("/api/discovery/resume",{method:"POST"});if(els.modeSelect.value==="both")await api("/api/downloads/resume",{method:"POST"})}catch(e){toast(e.message,"error")}});els.stopBtn.addEventListener("click",async()=>{try{await api("/api/discovery/stop",{method:"POST"});if(els.modeSelect.value==="both")await api("/api/downloads/stop",{method:"POST"})}catch(e){toast(e.message,"error")}});els.refreshMovies.addEventListener("click",()=>loadMovies().catch(e=>toast(e.message,"error")));els.movieStatusFilter.addEventListener("change",()=>loadMovies().catch(()=>{}));let timer;els.movieSearch.addEventListener("input",()=>{clearTimeout(timer);timer=setTimeout(()=>loadMovies().catch(()=>{}),250)});els.downloadStart.addEventListener("click",()=>api("/api/downloads/start",{method:"POST",body:JSON.stringify({language:state.language})}).catch(e=>toast(e.message,"error")));els.downloadPause.addEventListener("click",()=>api("/api/downloads/pause",{method:"POST"}).catch(e=>toast(e.message,"error")));els.downloadResume.addEventListener("click",()=>api("/api/downloads/resume",{method:"POST"}).catch(e=>toast(e.message,"error")));els.downloadStop.addEventListener("click",()=>api("/api/downloads/stop",{method:"POST"}).catch(e=>toast(e.message,"error")));els.clearActivity.addEventListener("click",()=>els.activityLog.innerHTML="");els.chooseFolder.addEventListener("click",async()=>{try{const r=await api("/api/settings/select-folder",{method:"POST",body:"{}"});if(r.path)els.downloadRoot.value=r.path}catch(e){toast(e.message,"error")}});els.saveSettings.addEventListener("click",async()=>{try{await api("/api/settings",{method:"POST",body:JSON.stringify({download_root:els.downloadRoot.value,maintain_target:els.maintainTarget.checked?"1":"0"})});toast("Settings saved.")}catch(e){toast(e.message,"error")}});document.body.addEventListener("click",async e=>{const o=e.target.closest("[data-open]"),yt=e.target.closest("[data-youtube]"),r=e.target.closest("[data-reject]"),wl=e.target.closest("[data-reject-wrong-language]"),rs=e.target.closest("[data-restore]"),cl=e.target.closest("[data-close-modal]"),sv=e.target.closest("#saveDirectSource"),retryDl=e.target.closest("[data-retry-download]");if(o)showMovie(o.dataset.open).catch(x=>toast(x.message,"error"));if(yt)window.open(yt.dataset.youtube,"_blank","noopener");if(cl)closeModal();if(sv)saveSource(sv.dataset.id).catch(x=>toast(x.message,"error"));if(retryDl){api(`/api/movies/${retryDl.dataset.retryDownload}/retry-download`,{method:"POST"}).then(()=>{toast("Download queued for retry.");return api("/api/downloads/start",{method:"POST",body:JSON.stringify({language:state.language})})}).catch(x=>toast(x.message,"error"))}if(r&&confirm("Remove this movie and prevent the same video from being accepted again?")){try{await api(`/api/movies/${r.dataset.reject}/reject`,{method:"POST",body:JSON.stringify({reason:"USER_REJECTED"})});toast("Movie removed. Replacement can be discovered automatically.");await loadMovies();await refresh()}catch(x){toast(x.message,"error")}}if(wl&&confirm("Reject this movie as wrong language and find a replacement?")){try{await api(`/api/movies/${wl.dataset.rejectWrongLanguage}/reject`,{method:"POST",body:JSON.stringify({reason:"WRONG_LANGUAGE"})});toast("Movie marked as wrong language. Replacement can be discovered automatically.");await loadMovies();await refresh()}catch(x){toast(x.message,"error")}}if(rs){try{await api(`/api/movies/${rs.dataset.restore}/restore`,{method:"POST"});toast("Movie restored.");await loadMovies();await refresh()}catch(x){toast(x.message,"error")}}});window.addEventListener("online",network);window.addEventListener("offline",network)}
+function bind(){document.querySelectorAll(".nav-item").forEach(b=>b.addEventListener("click",()=>{document.querySelectorAll(".nav-item").forEach(x=>x.classList.remove("active"));b.classList.add("active");document.querySelectorAll(".view").forEach(x=>x.classList.remove("active"));$(`view-${b.dataset.view}`).classList.add("active");$("pageTitle").textContent=b.textContent.trim()}));document.querySelectorAll("[data-go]").forEach(b=>b.addEventListener("click",()=>document.querySelector(`.nav-item[data-view="${b.dataset.go}"]`).click()));els.languageSelect.addEventListener("change",async()=>{state.language=els.languageSelect.value;clearSelection();await api("/api/settings",{method:"POST",body:JSON.stringify({active_language:state.language})});await bootstrap()});els.selectPageBtn.addEventListener("click",selectPage);els.selectAllFilteredBtn.addEventListener("click",()=>selectAllFiltered().catch(e=>toast(e.message,"error")));els.clearSelectionBtn.addEventListener("click",clearSelection);els.bulkRemoveReplace.addEventListener("click",()=>bulkAction("remove"));els.bulkWrongLanguage.addEventListener("click",()=>bulkAction("wrong-language"));els.bulkRestore.addEventListener("click",()=>bulkAction("restore"));document.body.addEventListener("change",e=>{const cb=e.target.closest("[data-select]");if(cb)toggleSelect(cb.dataset.select,cb.checked)});els.primaryActionBtn.addEventListener("click",()=>dashboardPrimaryAction());els.secondaryStopBtn.addEventListener("click",()=>dashboardStopAction());els.targetInput.addEventListener("input",()=>renderDashboardControls());els.modeSelect.addEventListener("change",()=>{state.mode=els.modeSelect.value;renderDashboardControls()});els.downloadPrimaryBtn.addEventListener("click",()=>downloadPrimaryAction());els.downloadStopBtn.addEventListener("click",()=>downloadStopAction());els.refreshMovies.addEventListener("click",()=>loadMovies().catch(e=>toast(e.message,"error")));els.movieStatusFilter.addEventListener("change",()=>{clearSelection();loadMovies().catch(()=>{})});let timer;els.movieSearch.addEventListener("input",()=>{clearTimeout(timer);timer=setTimeout(()=>{clearSelection();loadMovies().catch(()=>{})},250)});els.clearActivity.addEventListener("click",()=>els.activityLog.innerHTML="");els.chooseFolder.addEventListener("click",async()=>{try{const r=await api("/api/settings/select-folder",{method:"POST",body:"{}"});if(r.path)els.downloadRoot.value=r.path}catch(e){toast(e.message,"error")}});els.saveSettings.addEventListener("click",async()=>{try{await api("/api/settings",{method:"POST",body:JSON.stringify({download_root:els.downloadRoot.value,maintain_target:els.maintainTarget.checked?"1":"0"})});toast("Settings saved.")}catch(e){toast(e.message,"error")}});document.body.addEventListener("click",async e=>{const o=e.target.closest("[data-open]"),yt=e.target.closest("[data-youtube]"),r=e.target.closest("[data-reject]"),wl=e.target.closest("[data-reject-wrong-language]"),rs=e.target.closest("[data-restore]"),cl=e.target.closest("[data-close-modal]"),sv=e.target.closest("#saveDirectSource"),retryDl=e.target.closest("[data-retry-download]");if(o)showMovie(o.dataset.open).catch(x=>toast(x.message,"error"));if(yt)window.open(yt.dataset.youtube,"_blank","noopener");if(cl)closeModal();if(sv)saveSource(sv.dataset.id).catch(x=>toast(x.message,"error"));if(retryDl){api(`/api/movies/${retryDl.dataset.retryDownload}/retry-download`,{method:"POST"}).then(()=>{toast("Download queued for retry.");return api("/api/downloads/start",{method:"POST",body:JSON.stringify({language:state.language})})}).catch(x=>toast(x.message,"error"))}if(r&&confirm("Remove this movie and prevent the same video from being accepted again?")){try{await api(`/api/movies/${r.dataset.reject}/reject`,{method:"POST",body:JSON.stringify({reason:"USER_REJECTED"})});toast("Movie removed. Replacement can be discovered automatically.");await loadMovies();await refresh()}catch(x){toast(x.message,"error")}}if(wl&&confirm("Reject this movie as wrong language and find a replacement?")){try{await api(`/api/movies/${wl.dataset.rejectWrongLanguage}/reject`,{method:"POST",body:JSON.stringify({reason:"WRONG_LANGUAGE"})});toast("Movie marked as wrong language. Replacement can be discovered automatically.");await loadMovies();await refresh()}catch(x){toast(x.message,"error")}}if(rs){try{await api(`/api/movies/${rs.dataset.restore}/restore`,{method:"POST"});toast("Movie restored.");await loadMovies();await refresh()}catch(x){toast(x.message,"error")}}});window.addEventListener("online",network);window.addEventListener("offline",network)}
 function events(){const es=new EventSource("/api/events");es.addEventListener("movie_processed",async e=>{const d=JSON.parse(e.data).payload,m=d.movie,res=d.result;const msg=res==="ACCEPTED"?`Accepted: ${m.title}`:res==="UNDER_DURATION"?`Skipped under 60m: ${m.title}`:res==="WRONG_LANGUAGE"?`Skipped wrong language: ${m.title}`:res==="DUPLICATE"?`Duplicate skipped: ${m.title}`:`Rejected: ${m.title}`;addLog(msg,res==="ACCEPTED"?"log-good":"");await refresh();if(res==="ACCEPTED")await loadMovies()});es.addEventListener("discovery_status",async e=>{const p=JSON.parse(e.data).payload;state.runtime=state.runtime||{};state.runtime.discovery=p;renderStats(state.runtime);if(["COMPLETED","ERROR","STOPPED"].includes(p.status)){addLog(`Discovery ${p.status.toLowerCase()}: ${p.message}`,p.status==="ERROR"?"log-bad":"");await refresh();await loadMovies()}});es.addEventListener("download_status",e=>{const p=JSON.parse(e.data).payload;state.runtime=state.runtime||{};state.runtime.downloads=p;renderStats(state.runtime);addLog(p.message||`Download status: ${p.status}`)});es.addEventListener("download_progress",e=>{const p=JSON.parse(e.data).payload;addLog(`Downloading #${p.movie_id}: ${fmtBytes(p.bytes_downloaded)} / ${fmtBytes(p.total_bytes)} • ${fmtBytes(p.speed_bps)}/s • ETA ${fmtTime(p.eta_seconds)}`)});es.addEventListener("download_complete",async e=>{const p=JSON.parse(e.data).payload;addLog(`Download completed: ${p.file_path}`,"log-good");toast("Movie download completed.");await refresh();await loadMovies()});es.addEventListener("network_wait",e=>{const p=JSON.parse(e.data).payload;addLog(`Network/source interruption. Auto retry in ${p.delay}s. ${p.error||""}`,"log-bad")});es.addEventListener("error",e=>{const p=JSON.parse(e.data).payload;addLog(`${p.scope||"App"} error: ${p.message}`,"log-bad");toast(p.message||"An error occurred.","error")})}
 document.addEventListener("DOMContentLoaded",async()=>{cache();bind();network();events();try{await bootstrap();setInterval(refresh,5000)}catch(e){toast(e.message,"error")}});

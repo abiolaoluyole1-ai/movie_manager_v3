@@ -32,7 +32,7 @@
           <div class="controls">
             <div class="field"><label>Target</label><input id="targetInput" type="number" min="1" value="30"></div>
             <div class="field"><label>Mode</label><select id="modeSelect"><option value="discover">Discover only</option><option value="download">Download only</option><option value="both">Discover + Download</option></select></div>
-            <button class="btn primary" id="startBtn">Start</button><button class="btn" id="pauseBtn">Pause</button><button class="btn" id="resumeBtn">Resume</button><button class="btn danger-ghost" id="stopBtn">Stop</button>
+            <button class="btn primary" id="primaryActionBtn">Start</button><button class="btn danger-ghost hidden" id="secondaryStopBtn">Stop</button>
           </div>
         </div>
 
@@ -86,7 +86,7 @@
 
       <section id="view-downloads" class="view">
         <section class="panel glass">
-          <div class="panel-head"><div><p class="eyebrow">LOCAL STORAGE</p><h3>Download queue</h3></div><div class="toolbar"><button class="btn primary" id="downloadStart">Start downloads</button><button class="btn" id="downloadPause">Pause</button><button class="btn" id="downloadResume">Resume</button><button class="btn danger-ghost" id="downloadStop">Stop</button></div></div>
+          <div class="panel-head"><div><p class="eyebrow">LOCAL STORAGE</p><h3>Download queue</h3></div><div class="toolbar"><button class="btn primary" id="downloadPrimaryBtn">Start downloads</button><button class="btn danger-ghost hidden" id="downloadStopBtn">Stop</button></div></div>
           <div class="notice"><strong>Local downloading:</strong> V3 can save files from authorised/direct HTTP(S) movie-file sources. A normal YouTube watch URL is metadata/playback only and is not treated as a direct MP4 source.</div>
           <div class="movie-grid" id="downloadMovies"></div>
         </section>

@@ -14,8 +14,8 @@ class Runtime:
             "discovery_status": self.discovery.snapshot()["status"],
         }
 
-    def start_discovery(self, language, target):
-        return self.discovery.start(language, target)
+    def start_discovery(self, language, target, provider="youtube"):
+        return self.discovery.start(language, target, provider=provider)
 
     def restore_discovery(self, language):
         return self.discovery.restore_latest(language)

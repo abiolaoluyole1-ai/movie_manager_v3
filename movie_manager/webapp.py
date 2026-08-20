@@ -12,6 +12,7 @@ from .db import (
     reject_movie, reset_search_state, restore_movie, retry_download,
     set_download_source, set_setting, source_status_counts,
 )
+from .discovery import DISCOVERY_PROVIDERS
 from .events import events
 from .language_profiles import PROFILES
 from .runtime import runtime
@@ -54,10 +55,11 @@ def _maybe_start_replacement_discovery(language):
     if not maintain:
         return False
     target = int(get_setting(f"target:{language}", "30"))
+    provider = get_setting(f"provider:{language}", "youtube")
     accepted = count_movies(language, ACCEPTED)
     if accepted < target and runtime.discovery.snapshot()["status"] not in {"RUNNING", "PAUSED"}:
         try:
-            runtime.start_discovery(language, target)
+            runtime.start_discovery(language, target, provider=provider)
             return True
         except Exception:
             return False
@@ -77,6 +79,7 @@ def create_app():
         language = get_setting("active_language", "yoruba")
         runtime.restore_discovery(language)
         target = int(get_setting(f"target:{language}", "30"))
+        provider = get_setting(f"provider:{language}", "youtube")
         status_counts, download_counts = counts(language)
         src_counts = source_status_counts(language, ACCEPTED)
         movies = [_serialise_movie(m) for m in list_movies(language, limit=24)]
@@ -84,6 +87,8 @@ def create_app():
         return jsonify({
             "language": language,
             "target": target,
+            "provider": provider,
+            "providers": sorted(DISCOVERY_PROVIDERS),
             "settings": all_settings(),
             "languages": PROFILES,
             "api_configured": bool(key and key != "PASTE_YOUR_PRIVATE_KEY_HERE"),
@@ -125,13 +130,17 @@ def create_app():
         data = request.get_json(force=True)
         language = data.get("language", "yoruba")
         target = max(1, int(data.get("target", 30)))
+        provider = data.get("provider") or get_setting(f"provider:{language}", "youtube")
+        if provider not in DISCOVERY_PROVIDERS:
+            return jsonify({"ok": False, "error": f"Unknown discovery provider '{provider}'."}), 400
         profile = PROFILES.get(language)
         if not profile or not profile.get("enabled"):
             return jsonify({"ok": False, "error": "That language profile is not enabled yet."}), 400
         set_setting("active_language", language)
         set_setting(f"target:{language}", target)
+        set_setting(f"provider:{language}", provider)
         try:
-            runtime.start_discovery(language, target)
+            runtime.start_discovery(language, target, provider=provider)
         except Exception as exc:
             return jsonify({"ok": False, "error": str(exc)}), 400
         return jsonify({"ok": True, "runtime": runtime.snapshot()})

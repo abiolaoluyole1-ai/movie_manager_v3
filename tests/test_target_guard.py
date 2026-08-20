@@ -303,9 +303,9 @@ def test_replacement_trigger_never_starts_a_second_worker_while_one_is_active(ap
     started = []
     original_start = runtime.discovery.start
 
-    def tracking_start(language, target):
+    def tracking_start(language, target, provider="youtube"):
         started.append((language, target))
-        return original_start(language, target)
+        return original_start(language, target, provider=provider)
 
     monkeypatch.setattr(runtime.discovery, "start", tracking_start)
     # Simulate the worker already being active when the reject request lands.

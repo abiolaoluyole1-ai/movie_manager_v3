@@ -19,9 +19,28 @@ PROFILES = {
             "Yoruba family full movie",
             "Yoruba comedy full movie",
         ],
+        # Used by the Internet Archive provider (and any future provider that
+        # searches by free-text phrase rather than YouTube's query params).
+        "archive_queries": [
+            "Yoruba movie",
+            "Yoruba film",
+            "Yoruba full movie",
+            "old Yoruba movie",
+            "classic Yoruba movie",
+            "Nigerian Yoruba film",
+            "Yoruba cinema",
+            "Yoruba drama",
+            "Yoruba traditional movie",
+        ],
     },
-    "igbo": {"label": "Igbo", "enabled": False, "region_code": "NG", "relevance_language": "ig", "queries": []},
-    "hausa": {"label": "Hausa", "enabled": False, "region_code": "NG", "relevance_language": "ha", "queries": []},
+    "igbo": {
+        "label": "Igbo", "enabled": False, "region_code": "NG", "relevance_language": "ig",
+        "queries": [], "archive_queries": [],
+    },
+    "hausa": {
+        "label": "Hausa", "enabled": False, "region_code": "NG", "relevance_language": "ha",
+        "queries": [], "archive_queries": [],
+    },
 }
 
 BLOCKED_TERMS = {

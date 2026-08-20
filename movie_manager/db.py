@@ -98,6 +98,8 @@ def init_db():
         for column in ("source_provider", "source_error", "source_checked_at"):
             if column not in movie_columns:
                 conn.execute(f"ALTER TABLE movies ADD COLUMN {column} TEXT")
+        if "provider" not in movie_columns:
+            conn.execute("ALTER TABLE movies ADD COLUMN provider TEXT NOT NULL DEFAULT 'youtube'")
         for key, value in DEFAULTS.items():
             conn.execute("INSERT OR IGNORE INTO settings(key,value) VALUES (?,?)", (key, value))
 
@@ -154,12 +156,12 @@ def upsert_movie(movie):
     with _lock, connect() as conn:
         conn.execute("""
         INSERT INTO movies(
-            language,video_id,title,normalised_title,description,
+            language,video_id,provider,title,normalised_title,description,
             channel_id,channel_title,published_at,default_audio_language,default_language,duration_seconds,
             thumbnail_url,youtube_url,embeddable,licence,status,
             rejection_reason,download_url,download_status,source_query,
             created_at,updated_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(language,video_id) DO UPDATE SET
             title=excluded.title,
             normalised_title=excluded.normalised_title,
@@ -176,7 +178,8 @@ def upsert_movie(movie):
             source_query=excluded.source_query,
             updated_at=excluded.updated_at
         """, (
-            movie["language"], movie["video_id"], movie["title"], movie.get("normalised_title"),
+            movie["language"], movie["video_id"], movie.get("provider", "youtube"),
+            movie["title"], movie.get("normalised_title"),
             movie.get("description"), movie.get("channel_id"), movie.get("channel_title"),
             movie.get("published_at"), movie.get("default_audio_language"), movie.get("default_language"),
             int(movie.get("duration_seconds") or 0),
@@ -224,12 +227,12 @@ def upsert_movie_with_target_guard(movie, accepted_statuses, target):
 
             conn.execute("""
             INSERT INTO movies(
-                language,video_id,title,normalised_title,description,
+                language,video_id,provider,title,normalised_title,description,
                 channel_id,channel_title,published_at,default_audio_language,default_language,duration_seconds,
                 thumbnail_url,youtube_url,embeddable,licence,status,
                 rejection_reason,download_url,download_status,source_query,
                 created_at,updated_at
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(language,video_id) DO UPDATE SET
                 title=excluded.title,
                 normalised_title=excluded.normalised_title,
@@ -246,7 +249,8 @@ def upsert_movie_with_target_guard(movie, accepted_statuses, target):
                 source_query=excluded.source_query,
                 updated_at=excluded.updated_at
             """, (
-                movie["language"], movie["video_id"], movie["title"], movie.get("normalised_title"),
+                movie["language"], movie["video_id"], movie.get("provider", "youtube"),
+                movie["title"], movie.get("normalised_title"),
                 movie.get("description"), movie.get("channel_id"), movie.get("channel_title"),
                 movie.get("published_at"), movie.get("default_audio_language"), movie.get("default_language"),
                 int(movie.get("duration_seconds") or 0),

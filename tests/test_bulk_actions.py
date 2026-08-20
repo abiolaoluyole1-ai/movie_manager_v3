@@ -83,7 +83,10 @@ def test_bulk_reject_triggers_replacement_discovery_only_once(client, monkeypatc
 
     starts = []
     from movie_manager.webapp import runtime as app_runtime
-    monkeypatch.setattr(app_runtime, "start_discovery", lambda language, target: starts.append((language, target)))
+    monkeypatch.setattr(
+        app_runtime, "start_discovery",
+        lambda language, target, provider="youtube": starts.append((language, target))
+    )
 
     r = client.post("/api/movies/bulk/reject", json={"ids": ids[:5], "language": "yoruba"}).get_json()
 

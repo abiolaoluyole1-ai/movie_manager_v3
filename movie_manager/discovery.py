@@ -13,12 +13,14 @@ from .db import (
     get_latest_job, get_latest_source_query, movie_exists, save_search_state,
     update_job, upsert_movie, upsert_movie_with_target_guard,
 )
+from .content_rules import find_blocked_term, find_compilation_phrase, is_yoruba_candidate
 from .events import events
-from .language_profiles import (
-    BLOCKED_TERMS, COMPILATION_DESCRIPTION_PHRASES, COMPILATION_TITLE_PHRASES, PROFILES,
-)
+from .internet_archive import InternetArchiveError, InternetArchiveProvider
+from .language_profiles import PROFILES
 from .source_adapters import resolver
 from .utils import parse_iso8601_duration, normalise_title
+
+DISCOVERY_PROVIDERS = {"youtube", "internet_archive"}
 
 SEARCH_URL = "https://www.googleapis.com/youtube/v3/search"
 VIDEOS_URL = "https://www.googleapis.com/youtube/v3/videos"
@@ -62,6 +64,7 @@ class DiscoveryController:
         self._lock = threading.RLock()
         self.status = "IDLE"
         self.language = "yoruba"
+        self.provider = "youtube"
         self.target = 30
         self.stats = self._fresh_stats()
         self.current_query = ""
@@ -93,6 +96,7 @@ class DiscoveryController:
             return {
                 "status": self.status,
                 "language": self.language,
+                "provider": self.provider,
                 "target": self.target,
                 "current_query": self.current_query,
                 "message": self.message,
@@ -103,6 +107,7 @@ class DiscoveryController:
     def _job_stats(self):
         stats = dict(self.stats)
         stats["current_query"] = self.current_query
+        stats["provider"] = self.provider
         return stats
 
     def restore_latest(self, language):
@@ -121,6 +126,7 @@ class DiscoveryController:
             self.stats = restored
             self.status = job["status"]
             self.language = job["language"]
+            self.provider = job["stats"].get("provider", "youtube")
             self.target = int(job["target"] or self.target)
             self.current_query = (
                 job["stats"].get("current_query") or get_latest_source_query(language)
@@ -130,7 +136,7 @@ class DiscoveryController:
             self.network_wait = False
             return self.snapshot()
 
-    def start(self, language: str, target: int):
+    def start(self, language: str, target: int, provider: str = "youtube"):
         with self._lock:
             if self._thread and self._thread.is_alive():
                 if self.status == "PAUSED":
@@ -143,7 +149,10 @@ class DiscoveryController:
             profile = PROFILES.get(language)
             if not profile or not profile.get("enabled"):
                 raise ValueError(f"Language '{language}' is not enabled yet.")
+            if provider not in DISCOVERY_PROVIDERS:
+                raise ValueError(f"Unknown discovery provider '{provider}'.")
             self.language = language
+            self.provider = provider
             self.target = max(1, int(target))
             self._pause.clear()
             self._stop.clear()
@@ -273,51 +282,6 @@ class DiscoveryController:
         r = self._request(VIDEOS_URL, params)
         return [] if r is None else r.json().get("items", [])
 
-    @staticmethod
-    def _is_yoruba_language(value):
-        value = (value or "").strip().lower().replace("_", "-")
-        return value in {"yo", "yor", "yoruba"} or value.startswith("yo-")
-
-    @staticmethod
-    def _is_english_language(value):
-        value = (value or "").strip().lower().replace("_", "-")
-        return value in {"en", "eng", "english"} or value.startswith("en-")
-
-    @staticmethod
-    def _has_yoruba_content_evidence(title, description, channel_title):
-        title = (title or "").lower()
-        description = (description or "").lower()
-        channel_title = (channel_title or "").lower()
-        return (
-            "yoruba" in title
-            or "yorùbá" in title
-            or any(phrase in description for phrase in (
-                "yoruba movie", "yoruba film", "yoruba language", "yoruba nollywood",
-            ))
-            or "yoruba" in channel_title
-            or "yorùbá" in channel_title
-        )
-
-    def _is_yoruba_candidate(self, snippet, title, description, query):
-        audio_language = snippet.get("defaultAudioLanguage") or ""
-        default_language = snippet.get("defaultLanguage") or ""
-        has_yoruba_metadata = any(
-            self._is_yoruba_language(value) for value in (audio_language, default_language)
-        )
-        has_english_metadata = any(
-            self._is_english_language(value) for value in (audio_language, default_language)
-        )
-        has_content_evidence = self._has_yoruba_content_evidence(
-            title, description, snippet.get("channelTitle")
-        )
-        query_is_yoruba_specific = "yoruba" in (query or "").lower()
-
-        if has_yoruba_metadata:
-            return True
-        if has_english_metadata and not has_content_evidence:
-            return False
-        return query_is_yoruba_specific and has_content_evidence
-
     def _record_result(self, result):
         with self._lock:
             if result == "ACCEPTED":
@@ -332,6 +296,51 @@ class DiscoveryController:
                 self.stats["duplicates_skipped"] += 1
             elif result == "TARGET_REACHED":
                 self.stats["accepted"] = count_movies(self.language, ACCEPTED_STATUSES)
+            elif result == "PROVIDER_ERROR":
+                self.stats["rejected_not_movie"] += 1
+
+    def _accept_and_resolve(self, movie, result, resolution_override=None):
+        """Shared accept+source-resolution chokepoint used by every
+        provider's search cycle (YouTube, Internet Archive, ...).
+
+        Atomically enforces the exact-target guard via
+        upsert_movie_with_target_guard, then resolves (or applies a
+        provider-forced) download source via the same
+        apply_source_resolution atomic write used everywhere else, so every
+        provider gets identical exact-target and source-status guarantees.
+
+        resolution_override lets a provider force a specific source
+        resolution (e.g. Internet Archive marking an ambiguous-rights item
+        SOURCE_INVALID without ever probing/queuing its file) instead of
+        running the normal adapter resolver.
+
+        Returns (movie, result) reflecting what was actually stored.
+        """
+        guard_target = None if self.downloadable_only else self.target
+        stored_status = upsert_movie_with_target_guard(movie, ACCEPTED_STATUSES, guard_target)
+        if stored_status != "ACCEPTED":
+            result = "TARGET_REACHED"
+        movie = {**movie, "status": stored_status}
+
+        if stored_status == "ACCEPTED" and not self._stop.is_set():
+            movie_id = get_movie_id(self.language, movie["video_id"])
+            if movie_id is not None:
+                resolution = resolution_override if resolution_override is not None else resolver.resolve_movie(movie)
+                apply_source_resolution(movie_id, self.language, resolution, ACCEPTED_STATUSES)
+                movie["id"] = movie_id
+                movie["source_status"] = resolution.get("source_status")
+                movie["source_provider"] = resolution.get("provider")
+                movie["source_error"] = resolution.get("error")
+                if resolution.get("download_url"):
+                    movie["download_url"] = resolution["download_url"]
+                    movie["download_status"] = "READY"
+                events.emit("source_resolved", {
+                    "movie_id": movie_id,
+                    "source_status": resolution.get("source_status"),
+                    "provider": resolution.get("provider"),
+                    "error": resolution.get("error"),
+                })
+        return movie, result
 
     def _evaluate(self, item, query, min_seconds):
         vid = item["id"]
@@ -374,23 +383,23 @@ class DiscoveryController:
             movie["rejection_reason"] = "UNDER_60_MINUTES"
             return movie, "UNDER_DURATION"
 
-        if self.language == "yoruba" and not self._is_yoruba_candidate(snippet, title, description, query):
+        if self.language == "yoruba" and not is_yoruba_candidate(
+            snippet.get("defaultAudioLanguage") or "", snippet.get("defaultLanguage") or "",
+            title, description, snippet.get("channelTitle"), query,
+        ):
             movie["status"] = "REJECTED"
             movie["rejection_reason"] = "WRONG_LANGUAGE"
             return movie, "WRONG_LANGUAGE"
 
         title_lowered = title.lower()
-        title_phrase = next((phrase for phrase in COMPILATION_TITLE_PHRASES if phrase in title_lowered), None)
-        description_phrase = next(
-            (phrase for phrase in COMPILATION_DESCRIPTION_PHRASES if phrase in description.lower()), None
-        )
-        if title_phrase or description_phrase:
+        compilation = find_compilation_phrase(title_lowered, description.lower())
+        if compilation:
+            scope, phrase = compilation
             movie["status"] = "REJECTED"
-            scope = "TITLE" if title_phrase else "DESCRIPTION"
-            movie["rejection_reason"] = f"COMPILATION_{scope}:{title_phrase or description_phrase}"
+            movie["rejection_reason"] = f"COMPILATION_{scope}:{phrase}"
             return movie, "NOT_MOVIE"
 
-        blocked = next((term for term in BLOCKED_TERMS if term in lowered), None)
+        blocked = find_blocked_term(lowered)
         if blocked:
             movie["status"] = "REJECTED"
             movie["rejection_reason"] = f"BLOCKED_TERM:{blocked}"
@@ -409,149 +418,10 @@ class DiscoveryController:
 
     def _run(self):
         try:
-            key = os.getenv("YOUTUBE_API_KEY", "").strip()
-            if not key or key == "PASTE_YOUR_PRIVATE_KEY_HERE":
-                raise RuntimeError("YouTube API key is missing. Add it to the .env file.")
-
-            profile = PROFILES[self.language]
-            min_seconds = 60 * 60
-
-            while not self._stop.is_set():
-                accepted_now = count_movies(self.language, ACCEPTED_STATUSES)
-                progress_now = self._target_progress_count()
-                with self._lock:
-                    self.stats["accepted"] = accepted_now
-                if progress_now >= self.target:
-                    with self._lock:
-                        self.status = "COMPLETED"
-                        self.message = f"Target reached: {progress_now}/{self.target}"
-                    break
-
-                progressed = False
-                for query in profile["queries"]:
-                    if self._stop.is_set():
-                        break
-                    self._wait_if_paused()
-                    if self._target_progress_count() >= self.target:
-                        break
-
-                    token, exhausted = get_search_state(self.language, query)
-                    if exhausted:
-                        continue
-
-                    with self._lock:
-                        self.current_query = query
-                        self.message = f"Searching: {query}"
-                    events.emit("discovery_status", self.snapshot())
-
-                    params = {
-                        "part": "snippet",
-                        "type": "video",
-                        "maxResults": 50,
-                        "q": query,
-                        "regionCode": profile["region_code"],
-                        "videoDuration": "long",
-                        "safeSearch": "moderate",
-                        "key": key,
-                    }
-                    if profile.get("relevance_language"):
-                        params["relevanceLanguage"] = profile["relevance_language"]
-                    if token:
-                        params["pageToken"] = token
-
-                    response = self._search(params)
-                    if response is None:
-                        break
-                    payload = response.json()
-                    progressed = True
-                    items = payload.get("items", [])
-                    ids = [
-                        i.get("id", {}).get("videoId")
-                        for i in items
-                        if i.get("id", {}).get("videoId")
-                    ]
-
-                    new_ids = [vid for vid in ids if not movie_exists(self.language, vid)]
-                    existing_count = len(ids) - len(new_ids)
-                    with self._lock:
-                        self.stats["duplicates_skipped"] += existing_count
-                        self.stats["candidates_scanned"] += len(ids)
-
-                    details = self._fetch_details(new_ids)
-                    for item in details:
-                        if self._stop.is_set():
-                            break
-                        self._wait_if_paused()
-                        movie, result = self._evaluate(item, query, min_seconds)
-
-                        if result == "ACCEPTED":
-                            # Atomically re-checks accepted count against target at write
-                            # time, so a concurrent writer (another thread or process)
-                            # can never push the accepted total past target. In
-                            # downloadable-only mode the raw accepted count isn't the
-                            # scarce resource, so the ceiling is skipped here -- the
-                            # per-item downloadable-count check below stops the loop
-                            # once enough movies actually have a working source.
-                            guard_target = None if self.downloadable_only else self.target
-                            stored_status = upsert_movie_with_target_guard(
-                                movie, ACCEPTED_STATUSES, guard_target
-                            )
-                            if stored_status != "ACCEPTED":
-                                result = "TARGET_REACHED"
-                            movie = {**movie, "status": stored_status}
-
-                            if stored_status == "ACCEPTED" and not self._stop.is_set():
-                                movie_id = get_movie_id(self.language, movie["video_id"])
-                                if movie_id is not None:
-                                    resolution = resolver.resolve_movie(movie)
-                                    apply_source_resolution(
-                                        movie_id, self.language, resolution, ACCEPTED_STATUSES
-                                    )
-                                    movie["id"] = movie_id
-                                    movie["source_status"] = resolution.get("source_status")
-                                    movie["source_provider"] = resolution.get("provider")
-                                    movie["source_error"] = resolution.get("error")
-                                    if resolution.get("download_url"):
-                                        movie["download_url"] = resolution["download_url"]
-                                        movie["download_status"] = "READY"
-                                    events.emit("source_resolved", {
-                                        "movie_id": movie_id,
-                                        "source_status": resolution.get("source_status"),
-                                        "provider": resolution.get("provider"),
-                                        "error": resolution.get("error"),
-                                    })
-                        else:
-                            upsert_movie(movie)
-                        progressed = True
-
-                        self._record_result(result)
-
-                        events.emit("movie_processed", {
-                            "result": result,
-                            "movie": movie,
-                            "stats": dict(self.stats),
-                            "target": self.target,
-                        })
-
-                        if self._target_progress_count() >= self.target:
-                            break
-
-                    next_token = payload.get("nextPageToken")
-                    save_search_state(self.language, query, next_token, not bool(next_token))
-                    if self.job_id:
-                        update_job(self.job_id, stats=self._job_stats(), message=self.message)
-
-                if self._target_progress_count() >= self.target:
-                    continue
-
-                if not progressed:
-                    with self._lock:
-                        self.status = "COMPLETED"
-                        self.message = (
-                            "Search sources are exhausted before the target was reached. "
-                            "Reset search state or add more search terms later."
-                        )
-                    break
+            if self.provider == "internet_archive":
+                self._run_archive()
+            else:
+                self._run_youtube()
 
             if self._stop.is_set():
                 with self._lock:
@@ -569,3 +439,269 @@ class DiscoveryController:
             if self.job_id:
                 update_job(self.job_id, status=self.status, stats=self._job_stats(), message=self.message)
             events.emit("discovery_status", self.snapshot())
+
+    def _run_youtube(self):
+        key = os.getenv("YOUTUBE_API_KEY", "").strip()
+        if not key or key == "PASTE_YOUR_PRIVATE_KEY_HERE":
+            raise RuntimeError("YouTube API key is missing. Add it to the .env file.")
+
+        profile = PROFILES[self.language]
+        min_seconds = 60 * 60
+
+        while not self._stop.is_set():
+            accepted_now = count_movies(self.language, ACCEPTED_STATUSES)
+            progress_now = self._target_progress_count()
+            with self._lock:
+                self.stats["accepted"] = accepted_now
+            if progress_now >= self.target:
+                with self._lock:
+                    self.status = "COMPLETED"
+                    self.message = f"Target reached: {progress_now}/{self.target}"
+                break
+
+            progressed = False
+            for query in profile["queries"]:
+                if self._stop.is_set():
+                    break
+                self._wait_if_paused()
+                if self._target_progress_count() >= self.target:
+                    break
+
+                token, exhausted = get_search_state(self.language, query)
+                if exhausted:
+                    continue
+
+                with self._lock:
+                    self.current_query = query
+                    self.message = f"Searching: {query}"
+                events.emit("discovery_status", self.snapshot())
+
+                params = {
+                    "part": "snippet",
+                    "type": "video",
+                    "maxResults": 50,
+                    "q": query,
+                    "regionCode": profile["region_code"],
+                    "videoDuration": "long",
+                    "safeSearch": "moderate",
+                    "key": key,
+                }
+                if profile.get("relevance_language"):
+                    params["relevanceLanguage"] = profile["relevance_language"]
+                if token:
+                    params["pageToken"] = token
+
+                response = self._search(params)
+                if response is None:
+                    break
+                payload = response.json()
+                progressed = True
+                items = payload.get("items", [])
+                ids = [
+                    i.get("id", {}).get("videoId")
+                    for i in items
+                    if i.get("id", {}).get("videoId")
+                ]
+
+                new_ids = [vid for vid in ids if not movie_exists(self.language, vid)]
+                existing_count = len(ids) - len(new_ids)
+                with self._lock:
+                    self.stats["duplicates_skipped"] += existing_count
+                    self.stats["candidates_scanned"] += len(ids)
+
+                details = self._fetch_details(new_ids)
+                for item in details:
+                    if self._stop.is_set():
+                        break
+                    self._wait_if_paused()
+                    movie, result = self._evaluate(item, query, min_seconds)
+
+                    if result == "ACCEPTED":
+                        # Atomically re-checks accepted (or downloadable, in
+                        # downloadable-only mode) count against target at write
+                        # time, so a concurrent writer -- another thread in this
+                        # process, or a separate process -- can never push the
+                        # total past target.
+                        movie, result = self._accept_and_resolve(movie, result)
+                    else:
+                        upsert_movie(movie)
+                    progressed = True
+
+                    self._record_result(result)
+
+                    events.emit("movie_processed", {
+                        "result": result,
+                        "movie": movie,
+                        "stats": dict(self.stats),
+                        "target": self.target,
+                    })
+
+                    if self._target_progress_count() >= self.target:
+                        break
+
+                next_token = payload.get("nextPageToken")
+                save_search_state(self.language, query, next_token, not bool(next_token))
+                if self.job_id:
+                    update_job(self.job_id, stats=self._job_stats(), message=self.message)
+
+            if self._target_progress_count() >= self.target:
+                continue
+
+            if not progressed:
+                with self._lock:
+                    self.status = "COMPLETED"
+                    self.message = (
+                        "Search sources are exhausted before the target was reached. "
+                        "Reset search state or add more search terms later."
+                    )
+                break
+
+    def _archive_request(self, func, *args, **kwargs):
+        """Calls an InternetArchiveProvider method with the same retry/
+        backoff philosophy as YouTube's _request(): temporary network/HTTP
+        failures (including 429/5xx) are retried with backoff, flagging
+        network_wait for the UI exactly like YouTube discovery does;
+        permanent failures (InternetArchiveError) propagate immediately so
+        the caller can skip that one candidate and continue."""
+        attempt = 0
+        while not self._stop.is_set():
+            self._wait_if_paused()
+            try:
+                result = func(*args, **kwargs)
+                with self._lock:
+                    self.stats["api_requests"] += 1
+                    recovered = self.network_wait
+                    self.network_wait = False
+                if recovered:
+                    events.emit("discovery_status", self.snapshot())
+                return result
+            except InternetArchiveError:
+                raise
+            except requests.RequestException as exc:
+                delay = NETWORK_RETRY_SECONDS[min(attempt, len(NETWORK_RETRY_SECONDS) - 1)]
+                attempt += 1
+                with self._lock:
+                    self.stats["network_retries"] += 1
+                    self.message = f"Internet Archive unavailable. Retrying automatically in {delay}s..."
+                    self.network_wait = True
+                events.emit("network_wait", {"scope": "discovery", "delay": delay, "error": str(exc)})
+                events.emit("discovery_status", self.snapshot())
+                for _ in range(delay * 4):
+                    if self._stop.is_set():
+                        return None
+                    self._wait_if_paused()
+                    time.sleep(0.25)
+        return None
+
+    def _run_archive(self):
+        provider = InternetArchiveProvider()
+        profile = PROFILES[self.language]
+        queries = profile.get("archive_queries") or []
+        min_seconds = 60 * 60
+
+        while not self._stop.is_set():
+            progress_now = self._target_progress_count()
+            with self._lock:
+                self.stats["accepted"] = count_movies(self.language, ACCEPTED_STATUSES)
+            if progress_now >= self.target:
+                with self._lock:
+                    self.status = "COMPLETED"
+                    self.message = f"Target reached: {progress_now}/{self.target}"
+                break
+
+            progressed = False
+            for query in queries:
+                if self._stop.is_set():
+                    break
+                self._wait_if_paused()
+                if self._target_progress_count() >= self.target:
+                    break
+
+                state_key = f"archive:{query}"
+                token, exhausted = get_search_state(self.language, state_key)
+                if exhausted:
+                    continue
+                page = int(token) if token else 1
+
+                with self._lock:
+                    self.current_query = query
+                    self.message = f"Searching Internet Archive: {query}"
+                events.emit("discovery_status", self.snapshot())
+
+                try:
+                    search_result = self._archive_request(provider.search_page, query, page)
+                except InternetArchiveError as exc:
+                    logger.warning("Internet Archive query failed permanently: %s (%s)", query, exc)
+                    save_search_state(self.language, state_key, None, True)
+                    continue
+                if search_result is None:
+                    break
+                docs, num_found = search_result
+                progressed = True
+
+                identifiers = [d.get("identifier") for d in docs if d.get("identifier")]
+                new_candidates = [
+                    (identifier, doc) for identifier, doc in zip(identifiers, docs)
+                    if not movie_exists(self.language, f"internet_archive:{identifier}")
+                ]
+                existing_count = len(identifiers) - len(new_candidates)
+                with self._lock:
+                    self.stats["duplicates_skipped"] += existing_count
+                    self.stats["candidates_scanned"] += len(identifiers)
+
+                for identifier, doc in new_candidates:
+                    if self._stop.is_set():
+                        break
+                    self._wait_if_paused()
+                    try:
+                        eval_result = self._archive_request(
+                            provider.evaluate_candidate, identifier, doc, self.language, query, min_seconds
+                        )
+                    except InternetArchiveError:
+                        eval_result = (None, "PROVIDER_ERROR")
+                    if eval_result is None:
+                        break
+                    movie, result = eval_result
+                    if movie is None:
+                        continue
+                    progressed = True
+
+                    if result == "ACCEPTED":
+                        resolution_override = None
+                        if not movie.get("_rights_clear"):
+                            resolution_override = {
+                                "source_status": "SOURCE_INVALID",
+                                "provider": provider.name,
+                                "error": "Ambiguous or missing rights metadata; not auto-queued.",
+                                "download_url": None,
+                            }
+                        movie, result = self._accept_and_resolve(
+                            movie, result, resolution_override=resolution_override
+                        )
+                    else:
+                        upsert_movie(movie)
+
+                    self._record_result(result)
+                    events.emit("movie_processed", {
+                        "result": result, "movie": movie, "stats": dict(self.stats), "target": self.target,
+                    })
+
+                    if self._target_progress_count() >= self.target:
+                        break
+
+                has_more = (page * 50) < num_found
+                next_state = str(page + 1) if has_more else None
+                save_search_state(self.language, state_key, next_state, not has_more)
+                if self.job_id:
+                    update_job(self.job_id, stats=self._job_stats(), message=self.message)
+
+            if self._target_progress_count() >= self.target:
+                continue
+
+            if not progressed:
+                with self._lock:
+                    self.status = "COMPLETED"
+                    self.message = (
+                        "Internet Archive search sources are exhausted before the target was reached."
+                    )
+                break

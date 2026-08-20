@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Movie Manager V3</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <div class="ambient a1"></div><div class="ambient a2"></div>
+  <div class="shell">
+    <aside class="sidebar glass">
+      <div class="brand"><div class="brand-mark">▶</div><div><strong>Movie Manager</strong><small>V3 • Local</small></div></div>
+      <nav>
+        <button class="nav-item active" data-view="dashboard">Dashboard</button>
+        <button class="nav-item" data-view="movies">Movies</button>
+        <button class="nav-item" data-view="downloads">Downloads</button>
+        <button class="nav-item" data-view="settings">Settings</button>
+      </nav>
+      <div class="sidebar-bottom"><span class="dot" id="networkDot"></span><span id="networkText">Checking…</span></div>
+    </aside>
+
+    <main>
+      <header class="topbar">
+        <div><p class="eyebrow">LOCAL MOVIE AUTOMATION</p><h1 id="pageTitle">Dashboard</h1></div>
+        <div class="language-wrap glass"><label>Language</label><select id="languageSelect"></select></div>
+      </header>
+
+      <section id="view-dashboard" class="view active">
+        <div class="hero glass">
+          <div><p class="eyebrow">CURRENT RUN</p><h2>Discover real full-length movies.</h2><p class="muted">60+ minutes. Clips, trailers, interviews, reviews, music and obvious non-movies are rejected.</p></div>
+          <div class="controls">
+            <div class="field"><label>Target</label><input id="targetInput" type="number" min="1" value="30"></div>
+            <div class="field"><label>Mode</label><select id="modeSelect"><option value="discover">Discover only</option><option value="download">Download only</option><option value="both">Discover + Download</option></select></div>
+            <button class="btn primary" id="startBtn">Start</button><button class="btn" id="pauseBtn">Pause</button><button class="btn" id="resumeBtn">Resume</button><button class="btn danger-ghost" id="stopBtn">Stop</button>
+          </div>
+        </div>
+
+        <div class="stat-grid">
+          <article class="stat glass"><span>Target</span><strong id="statTarget">0</strong></article>
+          <article class="stat glass"><span>Accepted</span><strong id="statAccepted">0</strong></article>
+          <article class="stat glass"><span>Downloaded</span><strong id="statDownloaded">0</strong></article>
+          <article class="stat glass"><span>Remaining</span><strong id="statRemaining">0</strong></article>
+        </div>
+
+        <div class="grid-two">
+          <section class="panel glass">
+            <div class="panel-head"><div><p class="eyebrow">DISCOVERY</p><h3>Live progress</h3></div><span class="status-pill" id="discoveryStatus">IDLE</span></div>
+            <div class="progress-track"><div class="progress-fill" id="discoveryBar"></div></div>
+            <div class="progress-row"><strong id="discoveryProgressText">0 / 0</strong><span id="discoveryPercent">0%</span></div>
+            <div class="detail-grid">
+              <div><span>Scanned</span><b id="scannedCount">0</b></div><div><span>Under 60m</span><b id="underCount">0</b></div><div><span>Not movie</span><b id="notMovieCount">0</b></div><div><span>Duplicates</span><b id="duplicateCount">0</b></div><div><span>API requests</span><b id="apiCount">0</b></div><div><span>Auto retries</span><b id="retryCount">0</b></div>
+            </div>
+            <div class="current-task"><span>NOW</span><strong id="currentQuery">Waiting to start</strong><small id="discoveryMessage">Your progress is saved in SQLite.</small></div>
+          </section>
+
+          <section class="panel glass">
+            <div class="panel-head"><div><p class="eyebrow">DOWNLOADS</p><h3>Detailed status</h3></div><span class="status-pill" id="downloadStatus">IDLE</span></div>
+            <div class="download-summary" id="downloadSummary">No authorised local-file downloads queued.</div>
+            <div class="activity"><div class="activity-head"><strong>Live activity</strong><button class="text-btn" id="clearActivity">Clear</button></div><div id="activityLog" class="activity-log"></div></div>
+          </section>
+        </div>
+
+        <section class="panel glass"><div class="panel-head"><div><p class="eyebrow">RECENTLY FOUND</p><h3>Movie cards</h3></div><button class="text-btn" data-go="movies">View all</button></div><div class="movie-grid" id="recentMovies"></div></section>
+      </section>
+
+      <section id="view-movies" class="view">
+        <section class="panel glass"><div class="panel-head stack-mobile"><div><p class="eyebrow">CATALOGUE</p><h3 id="moviesTitle">Movies</h3></div><div class="toolbar"><input id="movieSearch" placeholder="Search title or channel"><select id="movieStatusFilter"><option value="ALL">All</option><option value="ACCEPTED">Accepted</option><option value="DOWNLOADED">Downloaded</option><option value="REJECTED">Rejected</option></select><button class="btn" id="refreshMovies">Refresh</button></div></div><div class="movie-grid" id="allMovies"></div></section>
+      </section>
+
+      <section id="view-downloads" class="view">
+        <section class="panel glass">
+          <div class="panel-head"><div><p class="eyebrow">LOCAL STORAGE</p><h3>Download queue</h3></div><div class="toolbar"><button class="btn primary" id="downloadStart">Start downloads</button><button class="btn" id="downloadPause">Pause</button><button class="btn" id="downloadResume">Resume</button><button class="btn danger-ghost" id="downloadStop">Stop</button></div></div>
+          <div class="notice"><strong>Local downloading:</strong> V3 can save files from authorised/direct HTTP(S) movie-file sources. A normal YouTube watch URL is metadata/playback only and is not treated as a direct MP4 source.</div>
+          <div class="movie-grid" id="downloadMovies"></div>
+        </section>
+      </section>
+
+      <section id="view-settings" class="view">
+        <section class="panel glass settings-panel">
+          <div><p class="eyebrow">SETTINGS</p><h3>Local application</h3></div>
+          <div class="setting-row"><div><strong>Minimum movie duration</strong><p>V3 is locked to 60 minutes for Yoruba discovery.</p></div><input id="minimumDuration" type="number" value="60" disabled></div>
+          <div class="setting-row"><div><strong>Maintain target automatically</strong><p>If you reject a movie, discovery can find a replacement.</p></div><label class="switch"><input id="maintainTarget" type="checkbox" checked><span></span></label></div>
+          <div class="setting-row vertical"><div><strong>Download folder</strong><p>Completed files are placed inside language folders such as Yoruba, Igbo and Hausa.</p></div><div class="path-row"><input id="downloadRoot" placeholder="C:\Movies\Movie Manager"><button class="btn" id="chooseFolder">Choose folder</button><button class="btn primary" id="saveSettings">Save</button></div></div>
+          <div class="setting-row"><div><strong>YouTube Data API</strong><p>Your private key stays inside the local <code>.env</code> file and is never shown here.</p></div><span class="status-pill" id="apiConfigured">CHECKING</span></div>
+        </section>
+      </section>
+    </main>
+  </div>
+
+  <div class="modal hidden" id="movieModal"><div class="modal-backdrop" data-close-modal></div><article class="modal-card glass"><button class="modal-close" data-close-modal>×</button><div id="modalBody"></div></article></div>
+  <div class="toast-wrap" id="toastWrap"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,58 @@
+import re
+from pathlib import Path
+from urllib.parse import urlparse
+
+_DURATION_RE = re.compile(
+    r"^P(?:(?P<days>\d+)D)?(?:T(?:(?P<hours>\d+)H)?(?:(?P<minutes>\d+)M)?(?:(?P<seconds>\d+)S)?)?$"
+)
+
+
+def parse_iso8601_duration(value: str) -> int:
+    if not value:
+        return 0
+    match = _DURATION_RE.match(value)
+    if not match:
+        return 0
+    parts = {k: int(v or 0) for k, v in match.groupdict().items()}
+    return parts["days"] * 86400 + parts["hours"] * 3600 + parts["minutes"] * 60 + parts["seconds"]
+
+
+def format_duration(seconds: int) -> str:
+    seconds = max(0, int(seconds or 0))
+    hours, rem = divmod(seconds, 3600)
+    minutes, _ = divmod(rem, 60)
+    if hours:
+        return f"{hours}h {minutes:02d}m"
+    return f"{minutes}m"
+
+
+def normalise_title(title: str) -> str:
+    text = (title or "").lower()
+    text = re.sub(r"\b(19|20)\d{2}\b", " ", text)
+    text = re.sub(r"\b(full|complete|latest|new|official|yoruba|nollywood|movie|film|part\s*\d+)\b", " ", text)
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return " ".join(text.split())
+
+
+def safe_filename(name: str, max_len: int = 150) -> str:
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name or "movie")
+    name = re.sub(r"\s+", " ", name).strip(" .")
+    return (name[:max_len].strip() or "movie")
+
+
+def extension_from_url(url: str, default: str = ".mp4") -> str:
+    try:
+        suffix = Path(urlparse(url).path).suffix.lower()
+        if suffix in {".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v"}:
+            return suffix
+    except Exception:
+        pass
+    return default
+
+
+def is_http_url(url: str) -> bool:
+    try:
+        p = urlparse(url)
+        return p.scheme in {"http", "https"} and bool(p.netloc)
+    except Exception:
+        return False

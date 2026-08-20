@@ -39,8 +39,11 @@
         <div class="stat-grid">
           <article class="stat glass"><span>Target</span><strong id="statTarget">0</strong></article>
           <article class="stat glass"><span>Accepted</span><strong id="statAccepted">0</strong></article>
+          <article class="stat glass"><span>Downloadable</span><strong id="statDownloadable">0</strong></article>
           <article class="stat glass"><span>Downloaded</span><strong id="statDownloaded">0</strong></article>
           <article class="stat glass"><span>Remaining</span><strong id="statRemaining">0</strong></article>
+          <article class="stat glass"><span>Source missing</span><strong id="statSourceMissing">0</strong></article>
+          <article class="stat glass"><span>Source invalid</span><strong id="statSourceInvalid">0</strong></article>
         </div>
 
         <div class="grid-two">
@@ -66,7 +69,7 @@
 
       <section id="view-movies" class="view">
         <section class="panel glass">
-          <div class="panel-head stack-mobile"><div><p class="eyebrow">CATALOGUE</p><h3 id="moviesTitle">Movies</h3></div><div class="toolbar"><input id="movieSearch" placeholder="Search title or channel"><select id="movieStatusFilter"><option value="ALL">All</option><option value="ACCEPTED">Accepted</option><option value="REJECTED">Rejected</option><option value="DOWNLOADED">Downloaded</option></select><button class="btn" id="refreshMovies">Refresh</button></div></div>
+          <div class="panel-head stack-mobile"><div><p class="eyebrow">CATALOGUE</p><h3 id="moviesTitle">Movies</h3></div><div class="toolbar"><input id="movieSearch" placeholder="Search title or channel"><select id="movieStatusFilter"><option value="ALL">All</option><option value="ACCEPTED">Accepted</option><option value="REJECTED">Rejected</option><option value="DOWNLOADED">Downloaded</option></select><button class="btn" id="resolveSourcesBtn">Resolve download sources</button><button class="btn" id="refreshMovies">Refresh</button></div></div>
           <div class="bulk-bar glass">
             <div class="bulk-select-group">
               <button class="btn" id="selectPageBtn">Select page</button>
@@ -97,8 +100,18 @@
           <div><p class="eyebrow">SETTINGS</p><h3>Local application</h3></div>
           <div class="setting-row"><div><strong>Minimum movie duration</strong><p>V3 is locked to 60 minutes for Yoruba discovery.</p></div><input id="minimumDuration" type="number" value="60" disabled></div>
           <div class="setting-row"><div><strong>Maintain target automatically</strong><p>If you reject a movie, discovery can find a replacement.</p></div><label class="switch"><input id="maintainTarget" type="checkbox" checked><span></span></label></div>
+          <div class="setting-row"><div><strong>Count only downloadable movies toward target</strong><p>When on, Target counts movies whose source is Ready or already Downloaded, not just Accepted. Discovery will keep scanning past the target's accepted count until enough movies are actually downloadable.</p></div><label class="switch"><input id="countOnlyDownloadable" type="checkbox"><span></span></label></div>
           <div class="setting-row vertical"><div><strong>Download folder</strong><p>Completed files are placed inside language folders such as Yoruba, Igbo and Hausa.</p></div><div class="path-row"><input id="downloadRoot" placeholder="C:\Movies\Movie Manager"><button class="btn" id="chooseFolder">Choose folder</button><button class="btn primary" id="saveSettings">Save</button></div></div>
           <div class="setting-row"><div><strong>YouTube Data API</strong><p>Your private key stays inside the local <code>.env</code> file and is never shown here.</p></div><span class="status-pill" id="apiConfigured">CHECKING</span></div>
+          <div class="setting-row vertical">
+            <div><strong>Import download sources</strong><p>Paste a CSV (<code>video_id,download_url</code>) or a JSON mapping to add authorised local-file sources in bulk. This never starts a download automatically.</p></div>
+            <div class="import-row">
+              <select id="importFormat"><option value="csv">CSV</option><option value="json">JSON</option></select>
+              <textarea id="importContent" rows="5" placeholder="video_id,download_url&#10;abc123,https://example.com/movie1.mp4"></textarea>
+              <button class="btn primary" id="importSourcesBtn">Import</button>
+            </div>
+            <div class="import-result" id="importResult"></div>
+          </div>
         </section>
       </section>
     </main>

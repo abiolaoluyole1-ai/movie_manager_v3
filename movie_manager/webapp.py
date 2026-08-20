@@ -1,21 +1,27 @@
 import os
 import queue
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from flask import Flask, Response, jsonify, render_template, request, send_file
 
 from .db import (
-    all_settings, bulk_reject_movies, bulk_restore_movies, count_movies, counts, get_movie,
-    get_setting, init_db, list_movie_ids, list_movies, reject_movie, reset_search_state,
-    restore_movie, retry_download, set_download_source, set_setting,
+    all_settings, all_video_ids, apply_source_resolution, bulk_reject_movies,
+    bulk_restore_movies, count_downloadable, count_movies, counts, get_movie,
+    get_setting, init_db, list_movie_ids, list_movies, list_movies_for_source_resolution,
+    reject_movie, reset_search_state, restore_movie, retry_download,
+    set_download_source, set_setting, source_status_counts,
 )
 from .events import events
 from .language_profiles import PROFILES
 from .runtime import runtime
-from .utils import format_duration, is_http_url
+from .source_adapters import resolver
+from .source_mappings import import_mapping_entries, parse_csv_mapping, parse_json_mapping
+from .utils import format_duration, is_direct_http_candidate, is_http_url
 
 ACCEPTED = ["ACCEPTED", "QUEUED", "DOWNLOADING", "DOWNLOADED"]
 BULK_REJECT_REASONS = {"USER_REJECTED", "WRONG_LANGUAGE"}
+SOURCE_RESOLVE_WORKERS = 8
 
 
 def _serialise_movie(movie):
@@ -72,6 +78,7 @@ def create_app():
         runtime.restore_discovery(language)
         target = int(get_setting(f"target:{language}", "30"))
         status_counts, download_counts = counts(language)
+        src_counts = source_status_counts(language, ACCEPTED)
         movies = [_serialise_movie(m) for m in list_movies(language, limit=24)]
         key = os.getenv("YOUTUBE_API_KEY", "").strip()
         return jsonify({
@@ -82,9 +89,13 @@ def create_app():
             "api_configured": bool(key and key != "PASTE_YOUR_PRIVATE_KEY_HERE"),
             "counts": {
                 "accepted": sum(status_counts.get(x, 0) for x in ACCEPTED),
+                "downloadable": count_downloadable(language, ACCEPTED),
                 "downloaded": status_counts.get("DOWNLOADED", 0),
                 "rejected": status_counts.get("REJECTED", 0),
                 "all": sum(status_counts.values()),
+                "source_missing": src_counts.get("SOURCE_MISSING", 0),
+                "source_invalid": src_counts.get("SOURCE_INVALID", 0),
+                "source_pending": src_counts.get("SOURCE_PENDING", 0),
                 "download": download_counts,
             },
             "runtime": runtime.snapshot(),
@@ -212,8 +223,7 @@ def create_app():
         if not movie:
             return jsonify({"ok": False, "error": "Movie not found."}), 404
 
-        lower = url.lower()
-        if "youtube.com/watch" in lower or "youtu.be/" in lower:
+        if not is_direct_http_candidate(url):
             return jsonify({
                 "ok": False,
                 "error": "A YouTube watch URL is not a direct local-file download source."
@@ -222,6 +232,64 @@ def create_app():
         set_download_source(movie_id, url)
         events.emit("download_source_ready", {"movie_id": movie_id})
         return jsonify({"ok": True})
+
+    @app.post("/api/movies/bulk/resolve-sources")
+    def movies_bulk_resolve_sources():
+        """Automatic bulk source resolution -- one backend operation, not one
+        request per movie. Runs HEAD probes concurrently; DB writes stay
+        serialised through apply_source_resolution's own lock."""
+        data = request.get_json(silent=True) or {}
+        language = data.get("language") or get_setting("active_language", "yoruba")
+        raw_ids = data.get("ids")
+        ids = _parse_bulk_ids(data) if isinstance(raw_ids, list) else None
+
+        candidates = list_movies_for_source_resolution(language, ids=ids, accepted_statuses=ACCEPTED)
+        result = {"checked": 0, "ready": 0, "missing": 0, "invalid": 0, "errors": 0}
+
+        if candidates:
+            with ThreadPoolExecutor(max_workers=SOURCE_RESOLVE_WORKERS) as pool:
+                futures = {pool.submit(resolver.resolve_movie, m): m for m in candidates}
+                for future in as_completed(futures):
+                    movie = futures[future]
+                    result["checked"] += 1
+                    try:
+                        resolution = future.result()
+                        apply_source_resolution(movie["id"], language, resolution, ACCEPTED)
+                    except Exception:
+                        result["errors"] += 1
+                        continue
+                    status = resolution.get("source_status")
+                    if status == "SOURCE_READY":
+                        result["ready"] += 1
+                    elif status == "SOURCE_MISSING":
+                        result["missing"] += 1
+                    elif status == "SOURCE_INVALID":
+                        result["invalid"] += 1
+
+        result["ok"] = True
+        events.emit("sources_bulk_resolved", {"language": language, **result})
+        return jsonify(result)
+
+    @app.post("/api/download-sources/import")
+    def download_sources_import():
+        """Import authorised source mappings from pasted CSV/JSON content.
+        Never starts a download automatically."""
+        data = request.get_json(silent=True) or {}
+        fmt = (data.get("format") or "").strip().lower()
+        content = data.get("content") or ""
+        try:
+            if fmt == "csv":
+                entries = parse_csv_mapping(content)
+            elif fmt == "json":
+                entries = parse_json_mapping(content)
+            else:
+                return jsonify({"ok": False, "error": "format must be 'csv' or 'json'."}), 400
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"Could not parse {fmt.upper()} content: {exc}"}), 400
+
+        result = import_mapping_entries(entries, known_video_ids=all_video_ids())
+        result["ok"] = True
+        return jsonify(result)
 
 
     @app.post("/api/movies/<int:movie_id>/retry-download")
@@ -278,7 +346,7 @@ def create_app():
     @app.post("/api/settings")
     def settings_update():
         data = request.get_json(force=True)
-        allowed = {"active_language", "maintain_target", "download_root"}
+        allowed = {"active_language", "maintain_target", "download_root", "count_only_downloadable"}
         for key, value in data.items():
             if key in allowed:
                 if key == "download_root":

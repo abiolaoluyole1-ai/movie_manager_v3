@@ -13,6 +13,7 @@ DEFAULTS = {
     "maintain_target": "1",
     "download_root": str(DEFAULT_DOWNLOAD_ROOT),
     "target:yoruba": "30",
+    "count_only_downloadable": "0",
 }
 
 NETWORK_RETRY_SECONDS = [5, 10, 20, 30, 60]

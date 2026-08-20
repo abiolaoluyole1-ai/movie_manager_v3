@@ -93,6 +93,11 @@ def init_db():
         for column in ("default_audio_language", "default_language"):
             if column not in movie_columns:
                 conn.execute(f"ALTER TABLE movies ADD COLUMN {column} TEXT")
+        if "source_status" not in movie_columns:
+            conn.execute("ALTER TABLE movies ADD COLUMN source_status TEXT NOT NULL DEFAULT 'SOURCE_PENDING'")
+        for column in ("source_provider", "source_error", "source_checked_at"):
+            if column not in movie_columns:
+                conn.execute(f"ALTER TABLE movies ADD COLUMN {column} TEXT")
         for key, value in DEFAULTS.items():
             conn.execute("INSERT OR IGNORE INTO settings(key,value) VALUES (?,?)", (key, value))
 
@@ -194,6 +199,10 @@ def upsert_movie_with_target_guard(movie, accepted_statuses, target):
     already satisfied at write time, the candidate is stored as
     DISCOVERED (not accepted, not rejected as bad content) instead.
 
+    Pass target=None to skip the ceiling check entirely (still an atomic
+    write) -- used when discovery is counting toward a downloadable-only
+    target instead of the raw accepted count.
+
     Returns the status actually stored.
     """
     now = now_iso()
@@ -204,7 +213,7 @@ def upsert_movie_with_target_guard(movie, accepted_statuses, target):
         conn.isolation_level = None
         conn.execute("BEGIN IMMEDIATE")
         try:
-            if requested_status == "ACCEPTED":
+            if requested_status == "ACCEPTED" and target is not None:
                 placeholders = ",".join("?" for _ in accepted_statuses)
                 current = conn.execute(
                     f"SELECT COUNT(*) FROM movies WHERE language=? AND status IN ({placeholders})",
@@ -251,6 +260,92 @@ def upsert_movie_with_target_guard(movie, accepted_statuses, target):
             conn.rollback()
             raise
     return final_status
+
+
+def get_movie_id(language, video_id):
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT id FROM movies WHERE language=? AND video_id=?", (language, video_id)
+        ).fetchone()
+        return row["id"] if row else None
+
+
+def all_video_ids():
+    with connect() as conn:
+        return {r["video_id"] for r in conn.execute("SELECT DISTINCT video_id FROM movies")}
+
+
+def count_downloadable(language, accepted_statuses):
+    """Count movies whose source is verified ready or already downloaded."""
+    placeholders = ",".join("?" for _ in accepted_statuses)
+    with connect() as conn:
+        return conn.execute(
+            f"""SELECT COUNT(*) FROM movies WHERE language=? AND status IN ({placeholders})
+                AND (source_status='SOURCE_READY' OR download_status='DOWNLOADED')""",
+            [language, *accepted_statuses]
+        ).fetchone()[0]
+
+
+def apply_source_resolution(movie_id, language, resolution, accepted_statuses):
+    """Persist a resolved (or missing/invalid) download source for a movie.
+
+    The write and the resulting downloadable-count computation happen in one
+    SQLite write transaction, so callers get a consistent count reflecting
+    at least this write -- avoiding a separate, racy follow-up count query.
+
+    Returns the downloadable count for the language after this write.
+    """
+    now = now_iso()
+    ready = resolution.get("source_status") == "SOURCE_READY"
+    with _lock, connect() as conn:
+        conn.isolation_level = None
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.execute("""
+            UPDATE movies SET
+                source_status=?,
+                source_provider=?,
+                source_error=?,
+                source_checked_at=?,
+                download_url=CASE WHEN ?=1 THEN ? ELSE download_url END,
+                download_status=CASE WHEN ?=1 AND download_status<>'DOWNLOADED' THEN 'READY' ELSE download_status END,
+                status=CASE WHEN status='DISCOVERED' AND ?=1 THEN 'ACCEPTED' ELSE status END,
+                updated_at=?
+            WHERE id=?
+            """, (
+                resolution.get("source_status", "SOURCE_MISSING"),
+                resolution.get("provider"), resolution.get("error"), now,
+                int(ready), resolution.get("download_url"),
+                int(ready), int(ready), now, movie_id
+            ))
+            placeholders = ",".join("?" for _ in accepted_statuses)
+            downloadable = conn.execute(
+                f"""SELECT COUNT(*) FROM movies WHERE language=? AND status IN ({placeholders})
+                    AND (source_status='SOURCE_READY' OR download_status='DOWNLOADED')""",
+                [language, *accepted_statuses]
+            ).fetchone()[0]
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+    return downloadable
+
+
+def list_movies_for_source_resolution(language, ids=None, accepted_statuses=None):
+    accepted_statuses = accepted_statuses or ["ACCEPTED", "QUEUED", "DOWNLOADING", "DOWNLOADED"]
+    params = [language]
+    placeholders = ",".join("?" for _ in accepted_statuses)
+    where = ["language=?", f"status IN ({placeholders})"]
+    params.extend(accepted_statuses)
+    if ids:
+        id_placeholders = ",".join("?" for _ in ids)
+        where.append(f"id IN ({id_placeholders})")
+        params.extend(ids)
+    with connect() as conn:
+        rows = conn.execute(
+            f"SELECT * FROM movies WHERE {' AND '.join(where)}", params
+        ).fetchall()
+        return [dict(r) for r in rows]
 
 
 def movie_exists(language, video_id):
@@ -383,6 +478,17 @@ def counts(language):
         """, (language,)).fetchall()
         download_counts = {r["download_status"]: r["n"] for r in drows}
         return status_counts, download_counts
+
+
+def source_status_counts(language, accepted_statuses):
+    placeholders = ",".join("?" for _ in accepted_statuses)
+    with connect() as conn:
+        rows = conn.execute(f"""
+        SELECT source_status, COUNT(*) n FROM movies
+        WHERE language=? AND status IN ({placeholders})
+        GROUP BY source_status
+        """, [language, *accepted_statuses]).fetchall()
+        return {r["source_status"]: r["n"] for r in rows}
 
 
 def next_download_ready(language=None):

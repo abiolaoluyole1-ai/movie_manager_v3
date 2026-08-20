@@ -8,7 +8,8 @@ import requests
 
 from .config import NETWORK_RETRY_SECONDS
 from .db import (
-    count_movies, create_job, find_probable_title_duplicate, get_search_state,
+    apply_source_resolution, count_downloadable, count_movies, create_job,
+    find_probable_title_duplicate, get_movie_id, get_search_state, get_setting,
     get_latest_job, get_latest_source_query, movie_exists, save_search_state,
     update_job, upsert_movie, upsert_movie_with_target_guard,
 )
@@ -16,6 +17,7 @@ from .events import events
 from .language_profiles import (
     BLOCKED_TERMS, COMPILATION_DESCRIPTION_PHRASES, COMPILATION_TITLE_PHRASES, PROFILES,
 )
+from .source_adapters import resolver
 from .utils import parse_iso8601_duration, normalise_title
 
 SEARCH_URL = "https://www.googleapis.com/youtube/v3/search"
@@ -66,6 +68,13 @@ class DiscoveryController:
         self.message = ""
         self.job_id = None
         self.network_wait = False
+        self.downloadable_only = False
+
+    def _target_progress_count(self, language=None):
+        language = language or self.language
+        if self.downloadable_only:
+            return count_downloadable(language, ACCEPTED_STATUSES)
+        return count_movies(language, ACCEPTED_STATUSES)
 
     def _fresh_stats(self):
         return {
@@ -140,7 +149,8 @@ class DiscoveryController:
             self._stop.clear()
             self.stats = self._fresh_stats()
             self.network_wait = False
-            accepted_now = count_movies(language, ACCEPTED_STATUSES)
+            self.downloadable_only = get_setting("count_only_downloadable", "0") == "1"
+            accepted_now = self._target_progress_count(language)
             if accepted_now >= self.target:
                 self.restore_latest(language)
                 self.target = max(1, int(target))
@@ -408,12 +418,13 @@ class DiscoveryController:
 
             while not self._stop.is_set():
                 accepted_now = count_movies(self.language, ACCEPTED_STATUSES)
+                progress_now = self._target_progress_count()
                 with self._lock:
                     self.stats["accepted"] = accepted_now
-                if accepted_now >= self.target:
+                if progress_now >= self.target:
                     with self._lock:
                         self.status = "COMPLETED"
-                        self.message = f"Target reached: {accepted_now}/{self.target}"
+                        self.message = f"Target reached: {progress_now}/{self.target}"
                     break
 
                 progressed = False
@@ -421,8 +432,7 @@ class DiscoveryController:
                     if self._stop.is_set():
                         break
                     self._wait_if_paused()
-                    accepted_now = count_movies(self.language, ACCEPTED_STATUSES)
-                    if accepted_now >= self.target:
+                    if self._target_progress_count() >= self.target:
                         break
 
                     token, exhausted = get_search_state(self.language, query)
@@ -477,13 +487,39 @@ class DiscoveryController:
                         if result == "ACCEPTED":
                             # Atomically re-checks accepted count against target at write
                             # time, so a concurrent writer (another thread or process)
-                            # can never push the accepted total past target.
+                            # can never push the accepted total past target. In
+                            # downloadable-only mode the raw accepted count isn't the
+                            # scarce resource, so the ceiling is skipped here -- the
+                            # per-item downloadable-count check below stops the loop
+                            # once enough movies actually have a working source.
+                            guard_target = None if self.downloadable_only else self.target
                             stored_status = upsert_movie_with_target_guard(
-                                movie, ACCEPTED_STATUSES, self.target
+                                movie, ACCEPTED_STATUSES, guard_target
                             )
                             if stored_status != "ACCEPTED":
                                 result = "TARGET_REACHED"
                             movie = {**movie, "status": stored_status}
+
+                            if stored_status == "ACCEPTED" and not self._stop.is_set():
+                                movie_id = get_movie_id(self.language, movie["video_id"])
+                                if movie_id is not None:
+                                    resolution = resolver.resolve_movie(movie)
+                                    apply_source_resolution(
+                                        movie_id, self.language, resolution, ACCEPTED_STATUSES
+                                    )
+                                    movie["id"] = movie_id
+                                    movie["source_status"] = resolution.get("source_status")
+                                    movie["source_provider"] = resolution.get("provider")
+                                    movie["source_error"] = resolution.get("error")
+                                    if resolution.get("download_url"):
+                                        movie["download_url"] = resolution["download_url"]
+                                        movie["download_status"] = "READY"
+                                    events.emit("source_resolved", {
+                                        "movie_id": movie_id,
+                                        "source_status": resolution.get("source_status"),
+                                        "provider": resolution.get("provider"),
+                                        "error": resolution.get("error"),
+                                    })
                         else:
                             upsert_movie(movie)
                         progressed = True
@@ -497,7 +533,7 @@ class DiscoveryController:
                             "target": self.target,
                         })
 
-                        if count_movies(self.language, ACCEPTED_STATUSES) >= self.target:
+                        if self._target_progress_count() >= self.target:
                             break
 
                     next_token = payload.get("nextPageToken")
@@ -505,7 +541,7 @@ class DiscoveryController:
                     if self.job_id:
                         update_job(self.job_id, stats=self._job_stats(), message=self.message)
 
-                if count_movies(self.language, ACCEPTED_STATUSES) >= self.target:
+                if self._target_progress_count() >= self.target:
                     continue
 
                 if not progressed:

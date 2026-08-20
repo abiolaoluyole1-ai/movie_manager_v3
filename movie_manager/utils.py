@@ -56,3 +56,18 @@ def is_http_url(url: str) -> bool:
         return p.scheme in {"http", "https"} and bool(p.netloc)
     except Exception:
         return False
+
+
+YOUTUBE_HOST_FRAGMENTS = ("youtube.com", "youtu.be")
+
+
+def is_direct_http_candidate(url: str) -> bool:
+    """True only for a genuine, non-YouTube, http(s) direct-file URL.
+
+    A youtube.com/watch or youtu.be URL is metadata/playback only and must
+    never be treated as a direct download source.
+    """
+    if not is_http_url(url):
+        return False
+    lower = url.lower()
+    return not any(fragment in lower for fragment in YOUTUBE_HOST_FRAGMENTS)

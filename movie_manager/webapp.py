@@ -5,8 +5,9 @@ from pathlib import Path
 from flask import Flask, Response, jsonify, render_template, request, send_file
 
 from .db import (
-    all_settings, count_movies, counts, get_movie, get_setting, init_db, list_movies,
-    reject_movie, reset_search_state, restore_movie, retry_download, set_download_source, set_setting,
+    all_settings, bulk_reject_movies, bulk_restore_movies, count_movies, counts, get_movie,
+    get_setting, init_db, list_movie_ids, list_movies, reject_movie, reset_search_state,
+    restore_movie, retry_download, set_download_source, set_setting,
 )
 from .events import events
 from .language_profiles import PROFILES
@@ -14,6 +15,7 @@ from .runtime import runtime
 from .utils import format_duration, is_http_url
 
 ACCEPTED = ["ACCEPTED", "QUEUED", "DOWNLOADING", "DOWNLOADED"]
+BULK_REJECT_REASONS = {"USER_REJECTED", "WRONG_LANGUAGE"}
 
 
 def _serialise_movie(movie):
@@ -21,6 +23,39 @@ def _serialise_movie(movie):
     movie["duration_label"] = format_duration(movie.get("duration_seconds", 0))
     movie["downloadable"] = bool(movie.get("download_url"))
     return movie
+
+
+def _parse_bulk_ids(data):
+    raw_ids = data.get("ids")
+    if not isinstance(raw_ids, list):
+        return None
+    ids = []
+    seen = set()
+    for item in raw_ids:
+        try:
+            value = int(item)
+        except (TypeError, ValueError):
+            continue
+        if value not in seen:
+            seen.add(value)
+            ids.append(value)
+    return ids
+
+
+def _maybe_start_replacement_discovery(language):
+    """Start at most one discovery worker if the accepted catalogue fell below target."""
+    maintain = get_setting("maintain_target", "1") == "1"
+    if not maintain:
+        return False
+    target = int(get_setting(f"target:{language}", "30"))
+    accepted = count_movies(language, ACCEPTED)
+    if accepted < target and runtime.discovery.snapshot()["status"] not in {"RUNNING", "PAUSED"}:
+        try:
+            runtime.start_discovery(language, target)
+            return True
+        except Exception:
+            return False
+    return False
 
 
 def create_app():
@@ -65,6 +100,14 @@ def create_app():
         offset = max(0, int(request.args.get("offset", 0)))
         rows = list_movies(language, status=status, search=search, limit=limit, offset=offset)
         return jsonify([_serialise_movie(m) for m in rows])
+
+    @app.get("/api/movies/ids")
+    def movies_ids():
+        language = request.args.get("language") or get_setting("active_language", "yoruba")
+        status = request.args.get("status", "ALL")
+        search = request.args.get("search", "")
+        ids = list_movie_ids(language, status=status, search=search)
+        return jsonify({"ids": ids, "count": len(ids)})
 
     @app.post("/api/discovery/start")
     def discovery_start():
@@ -113,15 +156,7 @@ def create_app():
             return jsonify({"ok": False, "error": "Movie not found."}), 404
 
         language = result["language"]
-        maintain = get_setting("maintain_target", "1") == "1"
-        if maintain:
-            target = int(get_setting(f"target:{language}", "30"))
-            accepted = count_movies(language, ACCEPTED)
-            if accepted < target and runtime.discovery.snapshot()["status"] not in {"RUNNING", "PAUSED"}:
-                try:
-                    runtime.start_discovery(language, target)
-                except Exception:
-                    pass
+        _maybe_start_replacement_discovery(language)
         events.emit("movie_rejected", {"movie_id": movie_id})
         return jsonify({"ok": True})
 
@@ -130,6 +165,42 @@ def create_app():
         restore_movie(movie_id)
         events.emit("movie_restored", {"movie_id": movie_id})
         return jsonify({"ok": True})
+
+    @app.post("/api/movies/bulk/reject")
+    def movies_bulk_reject():
+        data = request.get_json(silent=True) or {}
+        ids = _parse_bulk_ids(data)
+        if ids is None:
+            return jsonify({"ok": False, "error": "ids must be a list of movie IDs."}), 400
+        language = data.get("language") or get_setting("active_language", "yoruba")
+        reason = data.get("reason", "USER_REJECTED")
+        if reason not in BULK_REJECT_REASONS:
+            return jsonify({
+                "ok": False,
+                "error": f"reason must be one of {sorted(BULK_REJECT_REASONS)}."
+            }), 400
+
+        result = bulk_reject_movies(language, ids, reason)
+        replacement_triggered = (
+            _maybe_start_replacement_discovery(language) if result["updated"] > 0 else False
+        )
+        result["ok"] = True
+        result["replacement_triggered"] = replacement_triggered
+        events.emit("movies_bulk_rejected", {"language": language, "reason": reason, **result})
+        return jsonify(result)
+
+    @app.post("/api/movies/bulk/restore")
+    def movies_bulk_restore():
+        data = request.get_json(silent=True) or {}
+        ids = _parse_bulk_ids(data)
+        if ids is None:
+            return jsonify({"ok": False, "error": "ids must be a list of movie IDs."}), 400
+        language = data.get("language") or get_setting("active_language", "yoruba")
+
+        result = bulk_restore_movies(language, ids)
+        result["ok"] = True
+        events.emit("movies_bulk_restored", {"language": language, **result})
+        return jsonify(result)
 
     @app.post("/api/movies/<int:movie_id>/download-source")
     def movie_download_source(movie_id):

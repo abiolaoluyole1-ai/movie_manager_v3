@@ -38,6 +38,8 @@ def init_db():
             channel_id TEXT,
             channel_title TEXT,
             published_at TEXT,
+            default_audio_language TEXT,
+            default_language TEXT,
             duration_seconds INTEGER NOT NULL DEFAULT 0,
             thumbnail_url TEXT,
             youtube_url TEXT NOT NULL,
@@ -87,6 +89,10 @@ def init_db():
             updated_at TEXT NOT NULL
         );
         """)
+        movie_columns = {row["name"] for row in conn.execute("PRAGMA table_info(movies)")}
+        for column in ("default_audio_language", "default_language"):
+            if column not in movie_columns:
+                conn.execute(f"ALTER TABLE movies ADD COLUMN {column} TEXT")
         for key, value in DEFAULTS.items():
             conn.execute("INSERT OR IGNORE INTO settings(key,value) VALUES (?,?)", (key, value))
 
@@ -144,11 +150,11 @@ def upsert_movie(movie):
         conn.execute("""
         INSERT INTO movies(
             language,video_id,title,normalised_title,description,
-            channel_id,channel_title,published_at,duration_seconds,
+            channel_id,channel_title,published_at,default_audio_language,default_language,duration_seconds,
             thumbnail_url,youtube_url,embeddable,licence,status,
             rejection_reason,download_url,download_status,source_query,
             created_at,updated_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(language,video_id) DO UPDATE SET
             title=excluded.title,
             normalised_title=excluded.normalised_title,
@@ -156,6 +162,8 @@ def upsert_movie(movie):
             channel_id=excluded.channel_id,
             channel_title=excluded.channel_title,
             published_at=excluded.published_at,
+            default_audio_language=excluded.default_audio_language,
+            default_language=excluded.default_language,
             duration_seconds=excluded.duration_seconds,
             thumbnail_url=excluded.thumbnail_url,
             embeddable=excluded.embeddable,
@@ -165,7 +173,8 @@ def upsert_movie(movie):
         """, (
             movie["language"], movie["video_id"], movie["title"], movie.get("normalised_title"),
             movie.get("description"), movie.get("channel_id"), movie.get("channel_title"),
-            movie.get("published_at"), int(movie.get("duration_seconds") or 0),
+            movie.get("published_at"), movie.get("default_audio_language"), movie.get("default_language"),
+            int(movie.get("duration_seconds") or 0),
             movie.get("thumbnail_url"), movie["youtube_url"], int(bool(movie.get("embeddable"))),
             movie.get("licence"), movie.get("status", "DISCOVERED"), movie.get("rejection_reason"),
             movie.get("download_url"), movie.get("download_status", "NOT_READY"),
@@ -237,9 +246,13 @@ def get_movie(movie_id):
 def list_movies(language, status=None, limit=100, offset=0, search=""):
     params = [language]
     where = ["language=?"]
-    if status and status != "ALL":
+    if status == "ACCEPTED":
+        where.append("status IN ('ACCEPTED','QUEUED','DOWNLOADING')")
+    elif status == "DOWNLOADED":
+        where.append("download_status='DOWNLOADED'")
+    elif status == "REJECTED":
         where.append("status=?")
-        params.append(status)
+        params.append("REJECTED")
     if search:
         where.append("(title LIKE ? OR channel_title LIKE ?)")
         params.extend([f"%{search}%", f"%{search}%"])
@@ -251,6 +264,29 @@ def list_movies(language, status=None, limit=100, offset=0, search=""):
             params
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+def list_movie_ids(language, status=None, search="", limit=20000):
+    params = [language]
+    where = ["language=?"]
+    if status == "ACCEPTED":
+        where.append("status IN ('ACCEPTED','QUEUED','DOWNLOADING')")
+    elif status == "DOWNLOADED":
+        where.append("download_status='DOWNLOADED'")
+    elif status == "REJECTED":
+        where.append("status=?")
+        params.append("REJECTED")
+    if search:
+        where.append("(title LIKE ? OR channel_title LIKE ?)")
+        params.extend([f"%{search}%", f"%{search}%"])
+    params.append(int(limit))
+    with connect() as conn:
+        rows = conn.execute(
+            f"""SELECT id FROM movies WHERE {' AND '.join(where)}
+                ORDER BY id DESC LIMIT ?""",
+            params
+        ).fetchall()
+        return [r["id"] for r in rows]
 
 
 def count_movies(language, statuses=None):
@@ -370,6 +406,80 @@ def restore_movie(movie_id):
         UPDATE movies SET status='ACCEPTED', rejection_reason=NULL, updated_at=?
         WHERE id=?
         """, (now_iso(), movie_id))
+
+
+def _normalise_bulk_ids(movie_ids):
+    ids = []
+    seen = set()
+    for value in movie_ids or []:
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            continue
+        if value not in seen:
+            seen.add(value)
+            ids.append(value)
+    return ids
+
+
+def bulk_reject_movies(language, movie_ids, reason="USER_REJECTED"):
+    """Reject many movies for one language in a single transaction.
+
+    IDs that don't exist, or belong to a different language, count as
+    not_found; IDs already REJECTED are skipped rather than re-updated.
+    """
+    ids = _normalise_bulk_ids(movie_ids)
+    result = {"requested": len(ids), "updated": 0, "skipped": 0, "not_found": 0}
+    if not ids:
+        return result
+    with _lock, connect() as conn:
+        placeholders = ",".join("?" for _ in ids)
+        rows = conn.execute(
+            f"SELECT id,status FROM movies WHERE id IN ({placeholders}) AND language=?",
+            [*ids, language]
+        ).fetchall()
+        result["not_found"] = len(ids) - len(rows)
+        updatable_ids = [r["id"] for r in rows if r["status"] != "REJECTED"]
+        result["skipped"] = len(rows) - len(updatable_ids)
+        if updatable_ids:
+            up_placeholders = ",".join("?" for _ in updatable_ids)
+            cur = conn.execute(
+                f"""UPDATE movies SET status='REJECTED', rejection_reason=?,
+                download_status=CASE WHEN download_status='DOWNLOADED' THEN download_status ELSE 'NOT_READY' END,
+                updated_at=? WHERE id IN ({up_placeholders})""",
+                [reason, now_iso(), *updatable_ids]
+            )
+            result["updated"] = cur.rowcount
+    return result
+
+
+def bulk_restore_movies(language, movie_ids):
+    """Restore many REJECTED movies for one language in a single transaction.
+
+    Only updates existing rows, so restoring never creates duplicate rows.
+    """
+    ids = _normalise_bulk_ids(movie_ids)
+    result = {"requested": len(ids), "updated": 0, "skipped": 0, "not_found": 0}
+    if not ids:
+        return result
+    with _lock, connect() as conn:
+        placeholders = ",".join("?" for _ in ids)
+        rows = conn.execute(
+            f"SELECT id,status FROM movies WHERE id IN ({placeholders}) AND language=?",
+            [*ids, language]
+        ).fetchall()
+        result["not_found"] = len(ids) - len(rows)
+        updatable_ids = [r["id"] for r in rows if r["status"] == "REJECTED"]
+        result["skipped"] = len(rows) - len(updatable_ids)
+        if updatable_ids:
+            up_placeholders = ",".join("?" for _ in updatable_ids)
+            cur = conn.execute(
+                f"""UPDATE movies SET status='ACCEPTED', rejection_reason=NULL, updated_at=?
+                WHERE id IN ({up_placeholders})""",
+                [now_iso(), *updatable_ids]
+            )
+            result["updated"] = cur.rowcount
+    return result
 
 
 def retry_download(movie_id):

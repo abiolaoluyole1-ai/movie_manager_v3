@@ -49,7 +49,7 @@
             <div class="progress-track"><div class="progress-fill" id="discoveryBar"></div></div>
             <div class="progress-row"><strong id="discoveryProgressText">0 / 0</strong><span id="discoveryPercent">0%</span></div>
             <div class="detail-grid">
-              <div><span>Scanned</span><b id="scannedCount">0</b></div><div><span>Under 60m</span><b id="underCount">0</b></div><div><span>Not movie</span><b id="notMovieCount">0</b></div><div><span>Duplicates</span><b id="duplicateCount">0</b></div><div><span>API requests</span><b id="apiCount">0</b></div><div><span>Auto retries</span><b id="retryCount">0</b></div>
+              <div><span>Scanned</span><b id="scannedCount">0</b></div><div><span>Under 60m</span><b id="underCount">0</b></div><div><span>Not movie</span><b id="notMovieCount">0</b></div><div><span>Wrong language</span><b id="wrongLanguageCount">0</b></div><div><span>Duplicates</span><b id="duplicateCount">0</b></div><div><span>API requests</span><b id="apiCount">0</b></div><div><span>Auto retries</span><b id="retryCount">0</b></div>
             </div>
             <div class="current-task"><span>NOW</span><strong id="currentQuery">Waiting to start</strong><small id="discoveryMessage">Your progress is saved in SQLite.</small></div>
           </section>
@@ -65,7 +65,23 @@
       </section>
 
       <section id="view-movies" class="view">
-        <section class="panel glass"><div class="panel-head stack-mobile"><div><p class="eyebrow">CATALOGUE</p><h3 id="moviesTitle">Movies</h3></div><div class="toolbar"><input id="movieSearch" placeholder="Search title or channel"><select id="movieStatusFilter"><option value="ALL">All</option><option value="ACCEPTED">Accepted</option><option value="DOWNLOADED">Downloaded</option><option value="REJECTED">Rejected</option></select><button class="btn" id="refreshMovies">Refresh</button></div></div><div class="movie-grid" id="allMovies"></div></section>
+        <section class="panel glass">
+          <div class="panel-head stack-mobile"><div><p class="eyebrow">CATALOGUE</p><h3 id="moviesTitle">Movies</h3></div><div class="toolbar"><input id="movieSearch" placeholder="Search title or channel"><select id="movieStatusFilter"><option value="ALL">All</option><option value="ACCEPTED">Accepted</option><option value="REJECTED">Rejected</option><option value="DOWNLOADED">Downloaded</option></select><button class="btn" id="refreshMovies">Refresh</button></div></div>
+          <div class="bulk-bar glass">
+            <div class="bulk-select-group">
+              <button class="btn" id="selectPageBtn">Select page</button>
+              <button class="btn" id="selectAllFilteredBtn">Select all filtered results</button>
+              <button class="btn" id="clearSelectionBtn">Clear selection</button>
+              <span class="bulk-count" id="bulkCount">0 movies selected</span>
+            </div>
+            <div class="bulk-action-group hidden" id="bulkActions">
+              <button class="btn danger-ghost" id="bulkRemoveReplace">Remove &amp; Replace</button>
+              <button class="btn danger-ghost" id="bulkWrongLanguage">Wrong language</button>
+              <button class="btn primary" id="bulkRestore">Restore</button>
+            </div>
+          </div>
+          <div class="movie-grid" id="allMovies"></div>
+        </section>
       </section>
 
       <section id="view-downloads" class="view">

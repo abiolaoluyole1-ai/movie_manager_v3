@@ -89,6 +89,7 @@ def test_completed_run_stats_are_persisted_with_last_query(isolated_db):
     stats = {
         "candidates_scanned": 50, "accepted": 10,
         "rejected_under_duration": 1, "rejected_not_movie": 2,
+        "rejected_wrong_language": 3,
         "duplicates_skipped": 3, "api_requests": 2,
         "network_retries": 1, "current_query": "classic Yoruba full movie",
     }
@@ -110,6 +111,7 @@ def test_restore_latest_uses_persisted_stats(monkeypatch):
         "stats": {
             "candidates_scanned": 50, "accepted": 10,
             "rejected_under_duration": 1, "rejected_not_movie": 2,
+            "rejected_wrong_language": 3,
             "duplicates_skipped": 3, "api_requests": 2,
             "network_retries": 1, "current_query": "old Yoruba full movie",
         },
@@ -120,6 +122,7 @@ def test_restore_latest_uses_persisted_stats(monkeypatch):
     assert snapshot["status"] == "COMPLETED"
     assert snapshot["stats"]["candidates_scanned"] == 50
     assert snapshot["stats"]["api_requests"] == 2
+    assert snapshot["stats"]["rejected_wrong_language"] == 3
     assert snapshot["current_query"] == "old Yoruba full movie"
 
 
@@ -143,6 +146,7 @@ def test_bootstrap_restores_latest_discovery_stats_after_refresh(monkeypatch, is
     stats = {
         "candidates_scanned": 50, "accepted": 10,
         "rejected_under_duration": 1, "rejected_not_movie": 0,
+        "rejected_wrong_language": 2,
         "duplicates_skipped": 0, "api_requests": 2,
         "network_retries": 0, "current_query": "old Yoruba full movie",
     }
@@ -156,6 +160,7 @@ def test_bootstrap_restores_latest_discovery_stats_after_refresh(monkeypatch, is
 
     assert first["stats"]["candidates_scanned"] == 50
     assert first["stats"]["api_requests"] == 2
+    assert first["stats"]["rejected_wrong_language"] == 2
     assert first["current_query"] == "old Yoruba full movie"
     assert second == first
 
@@ -192,3 +197,128 @@ def test_satisfied_target_does_not_create_a_zero_stat_job(monkeypatch):
     assert controller.status == "COMPLETED"
     assert controller.stats["candidates_scanned"] == 50
     assert controller.stats["api_requests"] == 2
+
+
+def _video_item(title, description="A full Yoruba drama."):
+    return {
+        "id": "test-video-id",
+        "snippet": {"title": title, "description": description, "thumbnails": {}},
+        "contentDetails": {"duration": "PT1H17M"},
+        "status": {"embeddable": True},
+    }
+
+
+def _evaluate_movie(monkeypatch, title, description="A feature drama.", **snippet_fields):
+    monkeypatch.setattr("movie_manager.discovery.find_probable_title_duplicate", lambda *args, **kwargs: None)
+    item = _video_item(title, description)
+    item["snippet"].update(snippet_fields)
+    return DiscoveryController()._evaluate(item, "Yoruba full movie", 3600)
+
+
+@pytest.mark.parametrize("title", [
+    "ALAGBADA INA - BEST OF FADEYI AND ABIJA NIGERIAN YORUBA MOVIE",
+    "Yoruba Comedy Compilation",
+])
+def test_compilation_titles_are_rejected(monkeypatch, title):
+    monkeypatch.setattr("movie_manager.discovery.find_probable_title_duplicate", lambda *args, **kwargs: None)
+    movie, result = DiscoveryController()._evaluate(_video_item(title), "Yoruba full movie", 3600)
+
+    assert result == "NOT_MOVIE"
+    assert movie["status"] == "REJECTED"
+    assert movie["rejection_reason"].startswith("COMPILATION_TITLE:")
+
+
+def test_normal_full_movie_title_remains_acceptable(monkeypatch):
+    monkeypatch.setattr("movie_manager.discovery.find_probable_title_duplicate", lambda *args, **kwargs: None)
+    movie, result = DiscoveryController()._evaluate(
+        _video_item("ABELA PUPA | CLASSIC YORUBA MOVIE", "A collection of family memories."),
+        "Yoruba full movie", 3600,
+    )
+
+    assert result == "ACCEPTED"
+    assert movie["status"] == "ACCEPTED"
+
+
+def test_explicit_yoruba_audio_language_is_accepted(monkeypatch):
+    movie, result = _evaluate_movie(
+        monkeypatch, "The Promise", defaultAudioLanguage="yo-NG"
+    )
+
+    assert result == "ACCEPTED"
+    assert movie["default_audio_language"] == "yo-NG"
+
+
+def test_explicit_english_audio_without_yoruba_evidence_is_rejected(monkeypatch):
+    movie, result = _evaluate_movie(
+        monkeypatch, "The Promise", defaultAudioLanguage="en"
+    )
+
+    assert result == "WRONG_LANGUAGE"
+    assert movie["rejection_reason"] == "WRONG_LANGUAGE"
+
+
+def test_english_looking_title_with_yoruba_metadata_is_not_rejected(monkeypatch):
+    movie, result = _evaluate_movie(
+        monkeypatch, "A Mother's Promise", defaultLanguage="yoruba"
+    )
+
+    assert result == "ACCEPTED"
+    assert movie["default_language"] == "yoruba"
+
+
+def test_generic_nollywood_result_without_yoruba_evidence_is_rejected(monkeypatch):
+    movie, result = _evaluate_movie(
+        monkeypatch, "Nollywood Family Drama", "A Nigerian feature film."
+    )
+
+    assert result == "WRONG_LANGUAGE"
+    assert movie["rejection_reason"] == "WRONG_LANGUAGE"
+
+
+def test_missing_language_metadata_with_yoruba_evidence_can_pass(monkeypatch):
+    movie, result = _evaluate_movie(
+        monkeypatch, "A Mother's Promise", "An award-winning Yoruba movie.", channelTitle="Cinema Hub"
+    )
+
+    assert result == "ACCEPTED"
+    assert movie["default_audio_language"] is None
+
+
+def test_wrong_language_counter_increments(monkeypatch):
+    controller = DiscoveryController()
+    controller._record_result("WRONG_LANGUAGE")
+
+    assert controller.stats["rejected_wrong_language"] == 1
+
+
+def _stored_movie(video_id, title, status="ACCEPTED", download_status="NOT_READY"):
+    return {
+        "language": "yoruba", "video_id": video_id, "title": title,
+        "normalised_title": title.lower(), "description": "Yoruba movie.",
+        "channel_id": "channel", "channel_title": "Yoruba Channel",
+        "duration_seconds": 4200, "youtube_url": f"https://example.test/{video_id}",
+        "status": status, "download_status": download_status,
+    }
+
+
+def test_movies_api_filters_status_and_search_together(monkeypatch, isolated_db):
+    db.init_db()
+    db.upsert_movie(_stored_movie("accepted", "Searchable Accepted"))
+    db.upsert_movie(_stored_movie("queued", "Queued Feature", status="QUEUED", download_status="QUEUED"))
+    db.upsert_movie(_stored_movie("downloading", "Downloading Feature", status="DOWNLOADING", download_status="DOWNLOADING"))
+    db.upsert_movie(_stored_movie("rejected", "Rejected Feature", status="REJECTED"))
+    db.upsert_movie(_stored_movie("downloaded", "Downloaded Feature", status="DOWNLOADED", download_status="DOWNLOADED"))
+    monkeypatch.setattr("movie_manager.webapp.runtime", Runtime())
+    client = create_app().test_client()
+
+    all_rows = client.get("/api/movies?language=yoruba&status=ALL").get_json()
+    accepted_rows = client.get("/api/movies?language=yoruba&status=ACCEPTED").get_json()
+    rejected_rows = client.get("/api/movies?language=yoruba&status=REJECTED").get_json()
+    downloaded_rows = client.get("/api/movies?language=yoruba&status=DOWNLOADED").get_json()
+    searched_rows = client.get("/api/movies?language=yoruba&status=ACCEPTED&search=Searchable").get_json()
+
+    assert len(all_rows) == 5
+    assert {row["status"] for row in accepted_rows} == {"ACCEPTED", "QUEUED", "DOWNLOADING"}
+    assert [row["status"] for row in rejected_rows] == ["REJECTED"]
+    assert [row["download_status"] for row in downloaded_rows] == ["DOWNLOADED"]
+    assert [row["title"] for row in searched_rows] == ["Searchable Accepted"]

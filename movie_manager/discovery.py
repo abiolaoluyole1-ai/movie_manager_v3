@@ -13,7 +13,9 @@ from .db import (
     update_job, upsert_movie,
 )
 from .events import events
-from .language_profiles import PROFILES, BLOCKED_TERMS
+from .language_profiles import (
+    BLOCKED_TERMS, COMPILATION_DESCRIPTION_PHRASES, COMPILATION_TITLE_PHRASES, PROFILES,
+)
 from .utils import parse_iso8601_duration, normalise_title
 
 SEARCH_URL = "https://www.googleapis.com/youtube/v3/search"
@@ -70,6 +72,7 @@ class DiscoveryController:
             "accepted": 0,
             "rejected_under_duration": 0,
             "rejected_not_movie": 0,
+            "rejected_wrong_language": 0,
             "duplicates_skipped": 0,
             "api_requests": 0,
             "network_retries": 0,
@@ -249,6 +252,64 @@ class DiscoveryController:
         r = self._request(VIDEOS_URL, params)
         return [] if r is None else r.json().get("items", [])
 
+    @staticmethod
+    def _is_yoruba_language(value):
+        value = (value or "").strip().lower().replace("_", "-")
+        return value in {"yo", "yor", "yoruba"} or value.startswith("yo-")
+
+    @staticmethod
+    def _is_english_language(value):
+        value = (value or "").strip().lower().replace("_", "-")
+        return value in {"en", "eng", "english"} or value.startswith("en-")
+
+    @staticmethod
+    def _has_yoruba_content_evidence(title, description, channel_title):
+        title = (title or "").lower()
+        description = (description or "").lower()
+        channel_title = (channel_title or "").lower()
+        return (
+            "yoruba" in title
+            or "yorùbá" in title
+            or any(phrase in description for phrase in (
+                "yoruba movie", "yoruba film", "yoruba language", "yoruba nollywood",
+            ))
+            or "yoruba" in channel_title
+            or "yorùbá" in channel_title
+        )
+
+    def _is_yoruba_candidate(self, snippet, title, description, query):
+        audio_language = snippet.get("defaultAudioLanguage") or ""
+        default_language = snippet.get("defaultLanguage") or ""
+        has_yoruba_metadata = any(
+            self._is_yoruba_language(value) for value in (audio_language, default_language)
+        )
+        has_english_metadata = any(
+            self._is_english_language(value) for value in (audio_language, default_language)
+        )
+        has_content_evidence = self._has_yoruba_content_evidence(
+            title, description, snippet.get("channelTitle")
+        )
+        query_is_yoruba_specific = "yoruba" in (query or "").lower()
+
+        if has_yoruba_metadata:
+            return True
+        if has_english_metadata and not has_content_evidence:
+            return False
+        return query_is_yoruba_specific and has_content_evidence
+
+    def _record_result(self, result):
+        with self._lock:
+            if result == "ACCEPTED":
+                self.stats["accepted"] = count_movies(self.language, ACCEPTED_STATUSES)
+            elif result == "UNDER_DURATION":
+                self.stats["rejected_under_duration"] += 1
+            elif result == "WRONG_LANGUAGE":
+                self.stats["rejected_wrong_language"] += 1
+            elif result == "NOT_MOVIE":
+                self.stats["rejected_not_movie"] += 1
+            elif result == "DUPLICATE":
+                self.stats["duplicates_skipped"] += 1
+
     def _evaluate(self, item, query, min_seconds):
         vid = item["id"]
         snippet = item.get("snippet", {})
@@ -268,6 +329,8 @@ class DiscoveryController:
             "channel_id": snippet.get("channelId"),
             "channel_title": snippet.get("channelTitle"),
             "published_at": snippet.get("publishedAt"),
+            "default_audio_language": snippet.get("defaultAudioLanguage"),
+            "default_language": snippet.get("defaultLanguage"),
             "duration_seconds": duration,
             "thumbnail_url": (
                 snippet.get("thumbnails", {}).get("maxres", {}).get("url")
@@ -287,6 +350,22 @@ class DiscoveryController:
             movie["status"] = "REJECTED"
             movie["rejection_reason"] = "UNDER_60_MINUTES"
             return movie, "UNDER_DURATION"
+
+        if self.language == "yoruba" and not self._is_yoruba_candidate(snippet, title, description, query):
+            movie["status"] = "REJECTED"
+            movie["rejection_reason"] = "WRONG_LANGUAGE"
+            return movie, "WRONG_LANGUAGE"
+
+        title_lowered = title.lower()
+        title_phrase = next((phrase for phrase in COMPILATION_TITLE_PHRASES if phrase in title_lowered), None)
+        description_phrase = next(
+            (phrase for phrase in COMPILATION_DESCRIPTION_PHRASES if phrase in description.lower()), None
+        )
+        if title_phrase or description_phrase:
+            movie["status"] = "REJECTED"
+            scope = "TITLE" if title_phrase else "DESCRIPTION"
+            movie["rejection_reason"] = f"COMPILATION_{scope}:{title_phrase or description_phrase}"
+            return movie, "NOT_MOVIE"
 
         blocked = next((term for term in BLOCKED_TERMS if term in lowered), None)
         if blocked:
@@ -384,15 +463,7 @@ class DiscoveryController:
                         upsert_movie(movie)
                         progressed = True
 
-                        with self._lock:
-                            if result == "ACCEPTED":
-                                self.stats["accepted"] = count_movies(self.language, ACCEPTED_STATUSES)
-                            elif result == "UNDER_DURATION":
-                                self.stats["rejected_under_duration"] += 1
-                            elif result == "NOT_MOVIE":
-                                self.stats["rejected_not_movie"] += 1
-                            elif result == "DUPLICATE":
-                                self.stats["duplicates_skipped"] += 1
+                        self._record_result(result)
 
                         events.emit("movie_processed", {
                             "result": result,

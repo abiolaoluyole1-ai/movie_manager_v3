@@ -30,3 +30,16 @@ BLOCKED_TERMS = {
     "review", "reaction", "soundtrack", "music video", "official music",
     "highlights", "making of", "preview", "promo", "episode", "episodes",
 }
+
+# Titles are reliable indicators for these explicit non-movie formats. Description
+# matching intentionally excludes generic words such as "collection".
+COMPILATION_TITLE_PHRASES = {
+    "best of", "compilation", "movie compilation", "comedy compilation",
+    "collection of scenes", "funny moments", "funniest moments", "highlights",
+    "scene compilation", "scenes compilation",
+}
+
+COMPILATION_DESCRIPTION_PHRASES = {
+    "movie compilation", "comedy compilation", "collection of scenes",
+    "funny moments", "funniest moments", "scene compilation", "scenes compilation",
+}

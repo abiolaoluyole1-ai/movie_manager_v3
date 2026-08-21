@@ -7,7 +7,8 @@ import requests
 
 from .config import (
     CONCURRENCY_DEFAULT, CONCURRENCY_MAX, CONCURRENCY_MIN,
-    MIN_FREE_DISK_GB_DEFAULT, NETWORK_RETRY_SECONDS, clamp_min_free_disk_gb,
+    MIN_FREE_DISK_GB_DEFAULT, NETWORK_RETRY_SECONDS, YOUTUBE_BLOCKED_MESSAGE,
+    clamp_min_free_disk_gb, is_youtube_blocked_error,
 )
 from .db import get_setting, next_download_ready, update_download
 from .events import events
@@ -372,6 +373,12 @@ class DownloadController:
         except Exception as exc:
             if self._stop.is_set():
                 update_download(movie["id"], download_status="READY", status="ACCEPTED")
+                return
+            if is_youtube_blocked_error(exc):
+                update_download(movie["id"], download_status="FAILED", status="ACCEPTED",
+                                 download_error=YOUTUBE_BLOCKED_MESSAGE)
+                events.emit("error", {"scope": "download", "movie_id": movie["id"],
+                                       "message": YOUTUBE_BLOCKED_MESSAGE, "blocked": True})
                 return
             update_download(movie["id"], download_status="FAILED", status="ACCEPTED", download_error=str(exc))
             events.emit("error", {"scope": "download", "movie_id": movie["id"], "message": str(exc)})

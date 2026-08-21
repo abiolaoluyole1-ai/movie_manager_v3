@@ -32,6 +32,18 @@ def clamp_download_quality(value):
 
 NETWORK_RETRY_SECONDS = [5, 10, 20, 30, 60]
 
+YOUTUBE_BLOCKED_MESSAGE = (
+    "YouTube temporarily blocked this download. "
+    "Try again later or reduce simultaneous downloads."
+)
+YOUTUBE_BLOCKED_COOLDOWN_SECONDS = 300
+
+
+def is_youtube_blocked_error(exc):
+    """True for yt-dlp's 'confirm you're not a bot' access-denied error --
+    a YouTube-side anti-bot block, not a bug to retry rapidly around."""
+    return "not a bot" in str(exc).lower()
+
 
 def clamp_concurrency(value):
     """Clamps to the allowed 1-7 simultaneous-downloads range; any invalid

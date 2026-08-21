@@ -1,11 +1,15 @@
 import os
 import queue
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 from pathlib import Path
 
 from flask import Flask, Response, jsonify, render_template, request, send_file
 
-from .config import clamp_concurrency, clamp_download_quality, clamp_min_free_disk_gb
+from .config import (
+    YOUTUBE_BLOCKED_COOLDOWN_SECONDS, YOUTUBE_BLOCKED_MESSAGE,
+    clamp_concurrency, clamp_download_quality, clamp_min_free_disk_gb,
+)
 from .db import (
     all_settings, all_video_ids, apply_source_resolution, bulk_reject_movies,
     bulk_restore_movies, count_downloadable, count_movies, counts, get_movie,
@@ -372,8 +376,22 @@ def create_app():
         movie = get_movie(movie_id)
         if not movie:
             return jsonify({"ok": False, "error": "Movie not found."}), 404
-        if not movie.get("download_url"):
+        if movie.get("download_status") == "DOWNLOADED":
+            return jsonify({"ok": False, "error": "This movie has already been downloaded."}), 400
+        is_youtube = movie.get("provider") == "youtube" and movie.get("download_backend") == "YTDLP"
+        if not movie.get("download_url") and not is_youtube:
             return jsonify({"ok": False, "error": "This movie has no local-file download source yet."}), 400
+        if movie.get("download_error") == YOUTUBE_BLOCKED_MESSAGE:
+            try:
+                elapsed = (datetime.now(timezone.utc) - datetime.fromisoformat(movie["updated_at"])).total_seconds()
+            except (TypeError, ValueError):
+                elapsed = YOUTUBE_BLOCKED_COOLDOWN_SECONDS
+            if elapsed < YOUTUBE_BLOCKED_COOLDOWN_SECONDS:
+                wait = int(YOUTUBE_BLOCKED_COOLDOWN_SECONDS - elapsed)
+                return jsonify({
+                    "ok": False,
+                    "error": f"YouTube recently blocked this download. Wait about {wait}s before retrying.",
+                }), 429
         retry_download(movie_id)
         events.emit("download_retry", {"movie_id": movie_id})
         return jsonify({"ok": True})
@@ -436,7 +454,7 @@ def create_app():
         data = request.get_json(force=True)
         allowed = {
             "active_language", "maintain_target", "download_root", "count_only_downloadable",
-            "max_concurrent_downloads", "min_free_disk_gb",
+            "max_concurrent_downloads", "min_free_disk_gb", "download_quality",
         }
         for key, value in data.items():
             if key in allowed:

@@ -860,11 +860,17 @@ def retry_download(movie_id):
     """Requeues a movie for download. Guarded to only affect a movie that
     isn't already downloading/queued/downloaded, so a stray retry call can
     never pull an in-flight or finished job back into the READY queue and
-    cause a duplicate/duplicate-in-progress download."""
+    cause a duplicate/duplicate-in-progress download.
+
+    Accepts either a direct-HTTP movie (has a download_url) or a
+    YouTube/YTDLP movie (no permanent download_url -- YtDlpDownloadBackend
+    re-resolves streams from the stable video_id/youtube_url at download
+    time, so no URL needs to be stored)."""
     with _lock, connect() as conn:
         conn.execute("""
         UPDATE movies SET download_status='READY', download_error=NULL, retry_count=0,
         status=CASE WHEN status='REJECTED' THEN status ELSE 'ACCEPTED' END, updated_at=?
-        WHERE id=? AND download_url IS NOT NULL AND download_url<>''
+        WHERE id=?
+          AND ((download_backend='YTDLP' AND provider='youtube') OR (download_url IS NOT NULL AND download_url<>''))
           AND download_status NOT IN ('DOWNLOADING','QUEUED','DOWNLOADED')
         """, (now_iso(), movie_id))

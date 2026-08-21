@@ -21,7 +21,14 @@ DEFAULTS = {
     "count_only_downloadable": "0",
     "max_concurrent_downloads": str(CONCURRENCY_DEFAULT),
     "min_free_disk_gb": str(MIN_FREE_DISK_GB_DEFAULT),
+    "download_quality": "1080",
 }
+
+DOWNLOAD_QUALITY_CHOICES = {"best", "1080", "720", "480"}
+
+
+def clamp_download_quality(value):
+    return str(value) if str(value) in DOWNLOAD_QUALITY_CHOICES else "1080"
 
 NETWORK_RETRY_SECONDS = [5, 10, 20, 30, 60]
 

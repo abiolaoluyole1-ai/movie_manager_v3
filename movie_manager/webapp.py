@@ -5,13 +5,13 @@ from pathlib import Path
 
 from flask import Flask, Response, jsonify, render_template, request, send_file
 
-from .config import clamp_concurrency, clamp_min_free_disk_gb
+from .config import clamp_concurrency, clamp_download_quality, clamp_min_free_disk_gb
 from .db import (
     all_settings, all_video_ids, apply_source_resolution, bulk_reject_movies,
     bulk_restore_movies, count_downloadable, count_movies, counts, get_movie,
     get_setting, init_db, list_movie_ids, list_movies, list_movies_for_source_resolution,
     clear_movie_library, delete_movie_from_library, reject_movie, reset_search_state, restore_movie,
-    retry_download, set_download_source, set_setting, source_status_counts,
+    retry_download, set_download_source, set_setting, source_status_counts, queue_movies_for_download,
     start_fresh,
 )
 from .discovery import DISCOVERY_PROVIDERS
@@ -58,7 +58,7 @@ def _maybe_start_replacement_discovery(language):
     if not maintain:
         return False
     target = int(get_setting(f"target:{language}", "30"))
-    provider = get_setting(f"provider:{language}", "youtube")
+    provider = "youtube"
     accepted = count_movies(language, ACCEPTED)
     if accepted < target and runtime.discovery.snapshot()["status"] not in {"RUNNING", "PAUSED"}:
         try:
@@ -89,7 +89,7 @@ def create_app():
         language = get_setting("active_language", "yoruba")
         runtime.restore_discovery(language)
         target = int(get_setting(f"target:{language}", "30"))
-        provider = get_setting(f"provider:{language}", "youtube")
+        provider = "youtube"
         status_counts, download_counts = counts(language)
         src_counts = source_status_counts(language, ACCEPTED)
         movies = [_serialise_movie(m) for m in list_movies(language, limit=24)]
@@ -98,7 +98,7 @@ def create_app():
             "language": language,
             "target": target,
             "provider": provider,
-            "providers": sorted(DISCOVERY_PROVIDERS),
+            "providers": ["youtube"],
             "settings": all_settings(),
             "languages": PROFILES,
             "api_configured": bool(key and key != "PASTE_YOUR_PRIVATE_KEY_HERE"),
@@ -140,9 +140,7 @@ def create_app():
         data = request.get_json(force=True)
         language = data.get("language", "yoruba")
         target = max(1, int(data.get("target", 30)))
-        provider = data.get("provider") or get_setting(f"provider:{language}", "youtube")
-        if provider not in DISCOVERY_PROVIDERS:
-            return jsonify({"ok": False, "error": f"Unknown discovery provider '{provider}'."}), 400
+        provider = "youtube"
         profile = PROFILES.get(language)
         if not profile or not profile.get("enabled"):
             return jsonify({"ok": False, "error": "That language profile is not enabled yet."}), 400
@@ -150,6 +148,10 @@ def create_app():
         set_setting(f"target:{language}", target)
         set_setting(f"provider:{language}", provider)
         try:
+            # In combined mode start the existing worker pool first, then let
+            # discovery continuously feed its atomic queue.
+            if data.get("mode") == "both":
+                runtime.download.start(language, concurrency=clamp_concurrency(get_setting("max_concurrent_downloads", "3")))
             runtime.start_discovery(language, target, provider=provider)
         except Exception as exc:
             return jsonify({"ok": False, "error": str(exc)}), 400
@@ -271,6 +273,19 @@ def create_app():
         result = bulk_restore_movies(language, ids)
         result["ok"] = True
         events.emit("movies_bulk_restored", {"language": language, **result})
+        return jsonify(result)
+
+    @app.post("/api/movies/bulk/download")
+    def movies_bulk_download():
+        data = request.get_json(silent=True) or {}
+        ids = _parse_bulk_ids(data)
+        if ids is None:
+            return jsonify({"ok": False, "error": "ids must be a list of movie IDs."}), 400
+        language = data.get("language") or get_setting("active_language", "yoruba")
+        result = queue_movies_for_download(language, ids)
+        runtime.download.start(language, concurrency=clamp_concurrency(get_setting("max_concurrent_downloads", "3")))
+        result["ok"] = True
+        events.emit("downloads_queued", {"language": language, **result})
         return jsonify(result)
 
     @app.post("/api/movies/<int:movie_id>/download-source")
@@ -431,6 +446,8 @@ def create_app():
                     value = clamp_concurrency(value)
                 elif key == "min_free_disk_gb":
                     value = clamp_min_free_disk_gb(value)
+                elif key == "download_quality":
+                    value = clamp_download_quality(value)
                 set_setting(key, value)
         return jsonify({"ok": True, "settings": all_settings()})
 

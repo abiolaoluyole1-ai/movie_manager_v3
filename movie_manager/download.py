@@ -13,6 +13,72 @@ from .db import get_setting, next_download_ready, update_download
 from .events import events
 from .utils import extension_from_url, free_disk_space_gb, safe_filename, is_http_url
 
+
+class YtDlpDownloadBackend:
+    """yt-dlp integration owned by Movie Manager, with throttled progress."""
+    def __init__(self, controller):
+        self.controller = controller
+
+    @staticmethod
+    def _format(quality):
+        limit = {"1080": 1080, "720": 720, "480": 480}.get(str(quality))
+        if not limit:
+            return "bestvideo*+bestaudio/best"
+        return f"bestvideo*[height<={limit}]+bestaudio/best[height<={limit}]/best"
+
+    def download(self, movie, worker_id, final, part):
+        try:
+            import yt_dlp
+        except ImportError as exc:
+            raise RuntimeError("YouTube downloads unavailable: yt-dlp is not installed.") from exc
+        import shutil
+        if not shutil.which("ffmpeg"):
+            raise RuntimeError("YouTube downloads unavailable\nFFmpeg was not found.")
+        last = [0.0]
+        def hook(event):
+            if self.controller._stop.is_set():
+                raise yt_dlp.utils.DownloadCancelled("Stopped by user")
+            self.controller._wait_if_paused()
+            state = event.get("status")
+            if state == "downloading":
+                now = time.monotonic()
+                if now-last[0] < 1.0:
+                    return
+                last[0] = now
+                done, total = event.get("downloaded_bytes", 0), event.get("total_bytes") or event.get("total_bytes_estimate")
+                speed, eta = event.get("speed") or 0, event.get("eta")
+                update_download(movie["id"], download_status="DOWNLOADING", bytes_downloaded=done,
+                                total_bytes=total, download_speed_bps=speed, download_eta_seconds=eta)
+                self.controller._update_job(movie, worker_id, stage="DOWNLOADING", bytes_downloaded=done,
+                                            total_bytes=total, speed_bps=speed, eta_seconds=eta)
+                events.emit("download_progress", {"movie_id": movie["id"], "bytes_downloaded": done,
+                    "total_bytes": total, "speed_bps": speed, "eta_seconds": eta})
+            elif state == "postprocessing":
+                self.controller._update_job(movie, worker_id, stage="MERGING")
+
+        quality = get_setting("download_quality", "1080")
+        options = {
+            "format": self._format(quality), "outtmpl": str(final.with_suffix(".%(ext)s")),
+            "paths": {"home": str(final.parent), "temp": str(final.parent)}, "noplaylist": True,
+            "continuedl": True, "nopart": False, "merge_output_format": "mp4", "remuxvideo": "mp4",
+            "ffmpeg_location": shutil.which("ffmpeg"), "progress_hooks": [hook], "quiet": True,
+            "no_warnings": True, "retries": 3, "fragment_retries": 3,
+        }
+        self.controller._update_job(movie, worker_id, stage="PREPARING")
+        update_download(movie["id"], download_status="DOWNLOADING", file_path=str(part), download_error=None)
+        with yt_dlp.YoutubeDL(options) as ydl:
+            ydl.extract_info(movie["youtube_url"], download=True)
+        # yt-dlp has selected and remuxed the final file. Never fake an MP4 rename.
+        if not final.exists() or final.stat().st_size <= 0:
+            candidates = sorted(final.parent.glob(f"{safe_filename(movie['title'])}*.*"), key=lambda p: p.stat().st_mtime, reverse=True)
+            candidate = next((p for p in candidates if p.suffix.lower()==".mp4" and p.stat().st_size > 0), None)
+            if not candidate:
+                raise RuntimeError("Output verification failed: yt-dlp did not create an MP4 file.")
+            if candidate != final:
+                os.replace(candidate, final)
+        self.controller._update_job(movie, worker_id, stage="VERIFYING")
+        return final.stat().st_size
+
 IDLE_POLL_SECONDS = 2
 DISK_CHECK_WAIT_SECONDS = 10
 
@@ -118,7 +184,7 @@ class DownloadController:
         root = Path(get_setting("download_root"))
         folder = root / movie["language"].capitalize()
         folder.mkdir(parents=True, exist_ok=True)
-        ext = extension_from_url(movie["download_url"])
+        ext = ".mp4" if movie.get("download_backend") == "YTDLP" else extension_from_url(movie["download_url"])
         filename = safe_filename(movie["title"]) + ext
         final = folder / filename
         if final.exists():
@@ -158,6 +224,8 @@ class DownloadController:
                 events.emit("download_status", self.snapshot())
 
     def _download_one(self, movie, worker_id):
+        if movie.get("download_backend") == "YTDLP" and movie.get("provider") == "youtube":
+            return self._download_youtube_one(movie, worker_id)
         url = movie.get("download_url") or ""
         if not is_http_url(url):
             update_download(movie["id"], download_status="FAILED", download_error="Invalid direct download URL.")
@@ -291,6 +359,20 @@ class DownloadController:
                 # from its .part file on the next Start, instead of being
                 # stuck at DOWNLOADING (unclaimable) until a restart.
                 update_download(movie["id"], download_status="READY")
+
+    def _download_youtube_one(self, movie, worker_id):
+        final, part = self._output_paths(movie)
+        try:
+            actual = YtDlpDownloadBackend(self).download(movie, worker_id, final, part)
+            update_download(movie["id"], download_status="DOWNLOADED", status="DOWNLOADED", file_path=str(final),
+                bytes_downloaded=actual, total_bytes=actual, download_speed_bps=0, download_eta_seconds=0, download_error=None)
+            events.emit("download_complete", {"movie_id": movie["id"], "file_path": str(final)})
+        except Exception as exc:
+            if self._stop.is_set():
+                update_download(movie["id"], download_status="READY", status="ACCEPTED")
+                return
+            update_download(movie["id"], download_status="FAILED", status="ACCEPTED", download_error=str(exc))
+            events.emit("error", {"scope": "download", "movie_id": movie["id"], "message": str(exc)})
 
     def _update_job(self, movie, worker_id, **fields):
         with self._lock:

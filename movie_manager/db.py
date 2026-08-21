@@ -117,6 +117,13 @@ def init_db():
                 conn.execute(f"ALTER TABLE movies ADD COLUMN {column} TEXT")
         if "provider" not in movie_columns:
             conn.execute("ALTER TABLE movies ADD COLUMN provider TEXT NOT NULL DEFAULT 'youtube'")
+        if "provider_id" not in movie_columns:
+            conn.execute("ALTER TABLE movies ADD COLUMN provider_id TEXT")
+            conn.execute("UPDATE movies SET provider_id=video_id WHERE provider='youtube'")
+        if "source_type" not in movie_columns:
+            conn.execute("ALTER TABLE movies ADD COLUMN source_type TEXT")
+        if "download_backend" not in movie_columns:
+            conn.execute("ALTER TABLE movies ADD COLUMN download_backend TEXT")
         for key, value in DEFAULTS.items():
             conn.execute("INSERT OR IGNORE INTO settings(key,value) VALUES (?,?)", (key, value))
 
@@ -393,6 +400,45 @@ def apply_source_resolution(movie_id, language, resolution, accepted_statuses):
     return downloadable
 
 
+def mark_youtube_download_ready(movie_id):
+    """Make a stable YouTube identity eligible for yt-dlp.
+
+    The watch URL is deliberately the only persisted URL: expiring CDN stream
+    URLs are resolved by yt-dlp immediately before each transfer.
+    """
+    with _lock, connect() as conn:
+        conn.execute("""UPDATE movies SET provider='youtube', provider_id=video_id,
+            source_type='YOUTUBE', download_backend='YTDLP',
+            source_status='SOURCE_READY', source_provider='youtube', source_error=NULL,
+            source_checked_at=?, download_status=CASE WHEN download_status='DOWNLOADED'
+                THEN download_status ELSE 'READY' END, updated_at=? WHERE id=?""",
+            (now_iso(), now_iso(), movie_id))
+
+
+def queue_movies_for_download(language, ids=None):
+    """Queue selected accepted YouTube catalogue rows, reporting useful totals."""
+    with _lock, connect() as conn:
+        where = ["language=?", "status IN ('ACCEPTED','QUEUED')"]
+        params = [language]
+        if ids:
+            marks = ",".join("?" for _ in ids)
+            where.append(f"id IN ({marks})")
+            params.extend(ids)
+        rows = conn.execute(f"SELECT id,download_status FROM movies WHERE {' AND '.join(where)}", params).fetchall()
+        queued = already = 0
+        for row in rows:
+            if row['download_status'] == 'DOWNLOADED':
+                already += 1
+                continue
+            conn.execute("""UPDATE movies SET provider='youtube', provider_id=video_id,
+                source_type='YOUTUBE', download_backend='YTDLP', source_status='SOURCE_READY',
+                source_provider='youtube', source_error=NULL, download_status='READY', updated_at=? WHERE id=?""",
+                (now_iso(), row['id']))
+            queued += 1
+        return {"requested": len(ids) if ids is not None else len(rows), "queued": queued,
+                "already_downloaded": already, "could_not_queue": max(0, (len(ids) if ids is not None else len(rows))-len(rows))}
+
+
 def list_movies_for_source_resolution(language, ids=None, accepted_statuses=None):
     accepted_statuses = accepted_statuses or ["ACCEPTED", "QUEUED", "DOWNLOADING", "DOWNLOADED"]
     params = [language]
@@ -612,7 +658,7 @@ def next_download_ready(language=None):
     sql = """
     SELECT * FROM movies
     WHERE download_status IN ('READY','QUEUED','WAITING_NETWORK')
-      AND download_url IS NOT NULL AND download_url<>''
+      AND ((download_backend='YTDLP' AND provider='youtube') OR (download_url IS NOT NULL AND download_url<>''))
       AND status<>'REJECTED'
     """
     if language:

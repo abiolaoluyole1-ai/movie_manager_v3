@@ -32,7 +32,7 @@
           <div class="controls">
             <div class="field"><label for="targetInput">Target</label><input id="targetInput" type="number" min="1" value="30"></div>
             <div class="field"><label for="modeSelect">Mode</label><select id="modeSelect"><option value="discover">Discover only</option><option value="download">Download only</option><option value="both">Discover + Download</option></select></div>
-            <div class="field"><label for="providerSelect">Source</label><select id="providerSelect"><option value="youtube">YouTube</option><option value="internet_archive">Internet Archive</option></select></div>
+            <div class="field" hidden><label for="providerSelect">Source</label><select id="providerSelect"><option value="youtube">YouTube</option></select></div>
             <button class="btn primary" id="primaryActionBtn">Start</button><button class="btn danger-ghost hidden" id="secondaryStopBtn">Stop</button>
           </div>
         </div>
@@ -85,7 +85,7 @@
           </section>
         </div>
 
-        <section class="panel glass">
+        <section class="panel glass" hidden>
           <div class="panel-head"><div><p class="eyebrow">DIAGNOSTIC</p><h3>Scan provider supply</h3></div><span class="status-pill" id="supplyScanStatus">IDLE</span></div>
           <p class="muted" style="margin-bottom:14px">Checks whether a provider realistically has enough qualifying movies for this language -- searches and safely probes direct file URLs, but never downloads a full file and never adds anything to your catalogue.</p>
           <div class="controls" style="justify-content:flex-start">
@@ -133,7 +133,7 @@
             </div>
             <div class="bulk-action-group hidden" id="bulkActions">
               <button class="btn danger-ghost" id="bulkRemoveReplace">Remove &amp; Replace</button>
-              <button class="btn danger-ghost" id="bulkWrongLanguage">Wrong language</button>
+              <button class="btn danger-ghost" id="bulkWrongLanguage">Wrong language</button><button class="btn primary" id="bulkDownloadSelected">Download selected</button>
               <button class="btn primary" id="bulkRestore">Restore</button>
             </div>
           </div>
@@ -145,7 +145,7 @@
         <section class="panel glass">
           <div class="panel-head stack-mobile"><div><p class="eyebrow">DOWNLOADS</p><h3>Download queue</h3></div><div class="toolbar"><button class="btn primary" id="downloadPrimaryBtn">Start downloads</button><button class="btn danger-ghost hidden" id="downloadStopBtn">Stop</button></div></div>
           <div id="downloadsPageStateBanner" class="state-banner hidden" role="status"></div>
-          <div class="notice">Movie Manager saves completed movies straight into your download folder. A YouTube page link on its own can't be saved as a file -- only a movie with an authorised direct source can be downloaded.</div>
+          <div class="notice">Movie Manager downloads selected YouTube movies into your configured folder using yt-dlp and FFmpeg.</div>
           <div class="download-groups">
             <div>
               <div class="download-group-head"><h4>Downloading now</h4><span class="download-group-count" id="dgDownloadingCount">0</span></div>
@@ -174,13 +174,13 @@
           <div class="settings-section">
             <div class="settings-section-head"><h4>General</h4><p>Basic behaviour for how Movie Manager builds your catalogue.</p></div>
             <div class="setting-row"><div><strong>Minimum movie duration</strong><p>Movie Manager only keeps full-length movies (60+ minutes).</p></div><input id="minimumDuration" type="number" value="60" disabled aria-label="Minimum movie duration in minutes"></div>
-            <div class="setting-row"><div><strong>Maintain target automatically</strong><p>If you remove a movie, Movie Manager can look for a replacement on its own.</p></div><label class="switch"><input id="maintainTarget" type="checkbox" checked aria-label="Maintain target automatically"><span></span></label></div>
-            <div class="setting-row"><div><strong>Count only downloadable movies toward target</strong><p>When on, your target only counts movies that are ready or already downloaded, not just found.</p></div><label class="switch"><input id="countOnlyDownloadable" type="checkbox" aria-label="Count only downloadable movies toward target"><span></span></label></div>
+            <div class="setting-row" hidden><input id="maintainTarget" type="checkbox" checked><input id="countOnlyDownloadable" type="checkbox"></div>
           </div>
 
           <div class="settings-section">
             <div class="settings-section-head"><h4>Downloads</h4><p>Where movies are saved and how many download at once.</p></div>
             <div class="setting-row"><div><strong>Simultaneous downloads</strong><p>How many movies Movie Manager can download at the same time. A finished movie's slot is filled immediately by the next one.</p></div><select id="maxConcurrentDownloads" aria-label="Simultaneous downloads"><option value="1">1</option><option value="2">2</option><option value="3" selected>3</option><option value="4">4</option><option value="5">5</option><option value="6">6</option><option value="7">7</option></select></div>
+            <div class="setting-row"><div><strong>Download quality</strong><p>Prefer an MP4-compatible result, with automatic fallback when needed.</p></div><select id="downloadQuality"><option value="best">Best available</option><option value="1080" selected>Up to 1080p</option><option value="720">Up to 720p</option><option value="480">Up to 480p</option></select></div>
             <div class="setting-row"><div><strong>Minimum free disk space (GB)</strong><p>Downloads pause automatically -- without touching what's already saved -- when free space on the download drive falls below this.</p></div><input id="minFreeDiskGb" type="number" min="1" step="1" value="20" aria-label="Minimum free disk space in gigabytes"></div>
             <div class="setting-row vertical"><div><strong>Download folder</strong><p>Completed files are placed inside language folders such as Yoruba, Igbo and Hausa.</p></div><div class="path-row"><input id="downloadRoot" placeholder="C:\Movies\Movie Manager" aria-label="Download folder path"><button class="btn" id="chooseFolder">Choose folder</button><button class="btn primary" id="saveSettings">Save</button></div></div>
           </div>
@@ -190,9 +190,9 @@
             <div class="setting-row"><div><strong>YouTube connection</strong><p>Your private key stays inside the local <code>.env</code> file and is never shown here.</p></div><span class="status-pill" id="apiConfigured">CHECKING</span></div>
           </div>
 
-          <details class="advanced-block settings-section">
+          <details class="advanced-block settings-section" open>
             <summary><strong>Advanced</strong></summary>
-            <div class="setting-row vertical">
+            <div class="setting-row vertical" hidden>
               <div><strong>Import download sources</strong><p>Paste a CSV (<code>video_id,download_url</code>) or a JSON mapping to add authorised local-file sources in bulk. This never starts a download automatically.</p></div>
               <div class="import-row">
                 <select id="importFormat" aria-label="Import format"><option value="csv">CSV</option><option value="json">JSON</option></select>

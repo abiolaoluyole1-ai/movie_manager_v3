@@ -8,7 +8,7 @@ import requests
 
 from .config import NETWORK_RETRY_SECONDS
 from .db import (
-    apply_source_resolution, count_downloadable, count_movies, create_job,
+    apply_source_resolution, count_downloadable, count_movies, create_job, mark_youtube_download_ready,
     find_probable_title_duplicate, get_movie_id, get_provider_cache_entry, get_search_state,
     get_setting, get_latest_job, get_latest_source_query, movie_exists, save_search_state,
     set_provider_cache_entry, update_job, upsert_movie, upsert_movie_with_target_guard,
@@ -20,7 +20,7 @@ from .language_profiles import PROFILES
 from .source_adapters import resolver
 from .utils import parse_iso8601_duration, normalise_title
 
-DISCOVERY_PROVIDERS = {"youtube", "internet_archive"}
+DISCOVERY_PROVIDERS = {"youtube"}
 
 SEARCH_URL = "https://www.googleapis.com/youtube/v3/search"
 VIDEOS_URL = "https://www.googleapis.com/youtube/v3/videos"
@@ -327,8 +327,9 @@ class DiscoveryController:
 
         Returns (movie, result) reflecting what was actually stored.
         """
-        guard_target = None if self.downloadable_only else self.target
-        stored_status = upsert_movie_with_target_guard(movie, ACCEPTED_STATUSES, guard_target)
+        # The catalogue target is always an exact ceiling. A former
+        # downloadable-only branch bypassed this guard while sources resolved.
+        stored_status = upsert_movie_with_target_guard(movie, ACCEPTED_STATUSES, self.target)
         if stored_status != "ACCEPTED":
             result = "TARGET_REACHED"
         movie = {**movie, "status": stored_status}
@@ -336,20 +337,15 @@ class DiscoveryController:
         if stored_status == "ACCEPTED" and not self._stop.is_set():
             movie_id = get_movie_id(self.language, movie["video_id"])
             if movie_id is not None:
-                resolution = resolution_override if resolution_override is not None else resolver.resolve_movie(movie)
-                apply_source_resolution(movie_id, self.language, resolution, ACCEPTED_STATUSES)
+                # YouTube sources are stable identities, not fragile direct CDN URLs.
+                mark_youtube_download_ready(movie_id)
                 movie["id"] = movie_id
-                movie["source_status"] = resolution.get("source_status")
-                movie["source_provider"] = resolution.get("provider")
-                movie["source_error"] = resolution.get("error")
-                if resolution.get("download_url"):
-                    movie["download_url"] = resolution["download_url"]
-                    movie["download_status"] = "READY"
+                movie["source_status"] = "SOURCE_READY"
+                movie["source_provider"] = "youtube"
+                movie["download_status"] = "READY"
                 events.emit("source_resolved", {
                     "movie_id": movie_id,
-                    "source_status": resolution.get("source_status"),
-                    "provider": resolution.get("provider"),
-                    "error": resolution.get("error"),
+                    "source_status": "SOURCE_READY", "provider": "youtube", "error": None,
                 })
         return movie, result
 

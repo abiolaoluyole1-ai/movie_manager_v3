@@ -253,6 +253,8 @@ class DownloadController:
                         with self._lock:
                             recovered = self.network_wait
                             self.network_wait = False
+                            if recovered:
+                                self.message = f"Connection resumed: {movie['title']}"
                         if recovered:
                             events.emit("download_status", self.snapshot())
 
@@ -379,7 +381,11 @@ class DownloadController:
             job = self.active.get(movie["id"])
             if job is None:
                 return
+            prev_stage = job.get("stage")
             job.update(fields)
+            new_stage = job.get("stage")
+        if "stage" in fields and new_stage != prev_stage and new_stage in {"MERGING", "VERIFYING"}:
+            events.emit("download_stage", {"movie_id": movie["id"], "title": movie.get("title"), "stage": new_stage})
 
     def _run(self, worker_id=0):
         try:

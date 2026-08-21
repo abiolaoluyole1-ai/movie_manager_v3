@@ -10,8 +10,9 @@ from .db import (
     all_settings, all_video_ids, apply_source_resolution, bulk_reject_movies,
     bulk_restore_movies, count_downloadable, count_movies, counts, get_movie,
     get_setting, init_db, list_movie_ids, list_movies, list_movies_for_source_resolution,
-    reject_movie, reset_search_state, restore_movie,
+    clear_movie_library, delete_movie_from_library, reject_movie, reset_search_state, restore_movie,
     retry_download, set_download_source, set_setting, source_status_counts,
+    start_fresh,
 )
 from .discovery import DISCOVERY_PROVIDERS
 from .events import events
@@ -66,6 +67,13 @@ def _maybe_start_replacement_discovery(language):
         except Exception:
             return False
     return False
+
+
+def _workers_active():
+    snapshot = runtime.snapshot()
+    return any(snapshot[key]["status"] in {"RUNNING", "PAUSED"} for key in (
+        "discovery", "downloads", "supply_scan"
+    ))
 
 
 def create_app():
@@ -212,6 +220,15 @@ def create_app():
         language = result["language"]
         _maybe_start_replacement_discovery(language)
         events.emit("movie_rejected", {"movie_id": movie_id})
+        return jsonify({"ok": True})
+
+    @app.delete("/api/movies/<int:movie_id>")
+    def movie_delete(movie_id):
+        if _workers_active():
+            return jsonify({"ok": False, "error": "Stop discovery, downloads, and supply scans before deleting library data."}), 409
+        if not delete_movie_from_library(movie_id):
+            return jsonify({"ok": False, "error": "Movie not found."}), 404
+        events.emit("movie_deleted", {"movie_id": movie_id})
         return jsonify({"ok": True})
 
     @app.post("/api/movies/<int:movie_id>/restore")
@@ -386,6 +403,18 @@ def create_app():
     def downloads_stop():
         runtime.download.stop()
         return jsonify({"ok": True})
+
+    @app.post("/api/settings/clear-library")
+    def settings_clear_library():
+        if _workers_active():
+            return jsonify({"ok": False, "error": "Stop discovery, downloads, and supply scans before clearing the library."}), 409
+        return jsonify({"ok": True, "deleted": clear_movie_library()})
+
+    @app.post("/api/settings/start-fresh")
+    def settings_start_fresh():
+        if _workers_active():
+            return jsonify({"ok": False, "error": "Stop discovery, downloads, and supply scans before starting fresh."}), 409
+        return jsonify({"ok": True, "deleted": start_fresh()})
 
     @app.post("/api/settings")
     def settings_update():

@@ -168,6 +168,47 @@ def reset_search_state(language):
         conn.execute("DELETE FROM search_state WHERE language=?", (language,))
 
 
+def delete_movie_from_library(movie_id):
+    """Permanently forget one catalogue record; never touches its file path."""
+    with _lock, connect() as conn:
+        row = conn.execute("SELECT language FROM movies WHERE id=?", (movie_id,)).fetchone()
+        if not row:
+            return None
+        conn.execute("DELETE FROM movies WHERE id=?", (movie_id,))
+        return dict(row)
+
+
+def clear_movie_library():
+    """Remove catalogue rows only, preserving settings and provider memory."""
+    with _lock, connect() as conn:
+        conn.isolation_level = None
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            deleted = conn.execute("DELETE FROM movies").rowcount
+            conn.commit()
+            return deleted
+        except Exception:
+            conn.rollback()
+            raise
+
+
+def start_fresh():
+    """Forget discovery/download state while deliberately preserving settings/files."""
+    with _lock, connect() as conn:
+        conn.isolation_level = None
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            deleted = conn.execute("DELETE FROM movies").rowcount
+            conn.execute("DELETE FROM search_state")
+            conn.execute("DELETE FROM provider_scan_cache")
+            conn.execute("DELETE FROM jobs")
+            conn.commit()
+            return deleted
+        except Exception:
+            conn.rollback()
+            raise
+
+
 def upsert_movie(movie):
     now = now_iso()
     with _lock, connect() as conn:

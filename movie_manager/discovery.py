@@ -9,13 +9,13 @@ import requests
 from .config import NETWORK_RETRY_SECONDS
 from .db import (
     apply_source_resolution, count_downloadable, count_movies, create_job,
-    find_probable_title_duplicate, get_movie_id, get_search_state, get_setting,
-    get_latest_job, get_latest_source_query, movie_exists, save_search_state,
-    update_job, upsert_movie, upsert_movie_with_target_guard,
+    find_probable_title_duplicate, get_movie_id, get_provider_cache_entry, get_search_state,
+    get_setting, get_latest_job, get_latest_source_query, movie_exists, save_search_state,
+    set_provider_cache_entry, update_job, upsert_movie, upsert_movie_with_target_guard,
 )
 from .content_rules import find_blocked_term, find_compilation_phrase, is_yoruba_candidate
 from .events import events
-from .internet_archive import InternetArchiveError, InternetArchiveProvider
+from .internet_archive import ARCHIVE_NETWORK_RETRY_SECONDS, InternetArchiveError, InternetArchiveProvider
 from .language_profiles import PROFILES
 from .source_adapters import resolver
 from .utils import parse_iso8601_duration, normalise_title
@@ -27,6 +27,14 @@ VIDEOS_URL = "https://www.googleapis.com/youtube/v3/videos"
 ACCEPTED_STATUSES = ["ACCEPTED", "QUEUED", "DOWNLOADING", "DOWNLOADED"]
 TEMPORARY_API_STATUSES = {429, 500, 502, 503, 504}
 logger = logging.getLogger(__name__)
+
+
+class ArchiveTemporaryFailure(RuntimeError):
+    """Internet Archive kept failing on a transient error (timeout,
+    connection error, 429/500/502/503/504) even after the bounded backoff
+    retries were exhausted. Distinct from InternetArchiveError (a permanent,
+    non-retryable failure) so the caller can cache this candidate as
+    "temporary -- retry later" instead of "permanently rejected"."""
 
 
 class YouTubeAPIError(RuntimeError):
@@ -89,6 +97,9 @@ class DiscoveryController:
             "duplicates_skipped": 0,
             "api_requests": 0,
             "network_retries": 0,
+            "temporary_provider_errors": 0,
+            "permanent_provider_errors": 0,
+            "cache_hits": 0,
         }
 
     def snapshot(self):
@@ -297,7 +308,7 @@ class DiscoveryController:
             elif result == "TARGET_REACHED":
                 self.stats["accepted"] = count_movies(self.language, ACCEPTED_STATUSES)
             elif result == "PROVIDER_ERROR":
-                self.stats["rejected_not_movie"] += 1
+                self.stats["permanent_provider_errors"] += 1
 
     def _accept_and_resolve(self, movie, result, resolution_override=None):
         """Shared accept+source-resolution chokepoint used by every
@@ -556,13 +567,17 @@ class DiscoveryController:
                     )
                 break
 
-    def _archive_request(self, func, *args, **kwargs):
-        """Calls an InternetArchiveProvider method with the same retry/
-        backoff philosophy as YouTube's _request(): temporary network/HTTP
-        failures (including 429/5xx) are retried with backoff, flagging
-        network_wait for the UI exactly like YouTube discovery does;
-        permanent failures (InternetArchiveError) propagate immediately so
-        the caller can skip that one candidate and continue."""
+    def _archive_request(self, func, *args, max_attempts=4, **kwargs):
+        """Calls an InternetArchiveProvider method with a bounded retry/
+        backoff: temporary network/HTTP failures (timeout, connection error,
+        429/500/502/503/504) are retried with Archive's own (longer, more
+        patient) backoff table, flagging network_wait for the UI exactly
+        like YouTube discovery does. Unlike YouTube's _request() (which
+        retries forever), this gives up after max_attempts and raises
+        ArchiveTemporaryFailure -- so one persistently-flaky Archive item
+        can never block the whole scan indefinitely; the caller skips it
+        and moves on, and it stays eligible for retry on a later run.
+        Permanent failures (InternetArchiveError) propagate immediately."""
         attempt = 0
         while not self._stop.is_set():
             self._wait_if_paused()
@@ -578,10 +593,14 @@ class DiscoveryController:
             except InternetArchiveError:
                 raise
             except requests.RequestException as exc:
-                delay = NETWORK_RETRY_SECONDS[min(attempt, len(NETWORK_RETRY_SECONDS) - 1)]
                 attempt += 1
                 with self._lock:
                     self.stats["network_retries"] += 1
+                    self.stats["temporary_provider_errors"] += 1
+                if attempt >= max_attempts:
+                    raise ArchiveTemporaryFailure(str(exc)) from exc
+                delay = ARCHIVE_NETWORK_RETRY_SECONDS[min(attempt - 1, len(ARCHIVE_NETWORK_RETRY_SECONDS) - 1)]
+                with self._lock:
                     self.message = f"Internet Archive unavailable. Retrying automatically in {delay}s..."
                     self.network_wait = True
                 events.emit("network_wait", {"scope": "discovery", "delay": delay, "error": str(exc)})
@@ -634,6 +653,9 @@ class DiscoveryController:
                     logger.warning("Internet Archive query failed permanently: %s (%s)", query, exc)
                     save_search_state(self.language, state_key, None, True)
                     continue
+                except ArchiveTemporaryFailure as exc:
+                    logger.warning("Internet Archive query temporarily unreachable: %s (%s)", query, exc)
+                    continue
                 if search_result is None:
                     break
                 docs, num_found = search_result
@@ -653,15 +675,39 @@ class DiscoveryController:
                     if self._stop.is_set():
                         break
                     self._wait_if_paused()
-                    try:
-                        eval_result = self._archive_request(
-                            provider.evaluate_candidate, identifier, doc, self.language, query, min_seconds
+
+                    cache_entry = get_provider_cache_entry(provider.name, self.language, identifier)
+                    if cache_entry and cache_entry["status"] != "ERROR_TEMPORARY":
+                        with self._lock:
+                            self.stats["cache_hits"] += 1
+                        movie, result = provider.movie_from_cache(
+                            self.language, identifier, doc, query, cache_entry
                         )
-                    except InternetArchiveError:
-                        eval_result = (None, "PROVIDER_ERROR")
-                    if eval_result is None:
-                        break
-                    movie, result = eval_result
+                    else:
+                        try:
+                            eval_result = self._archive_request(
+                                provider.evaluate_candidate, identifier, doc, self.language, query, min_seconds
+                            )
+                        except InternetArchiveError as exc:
+                            set_provider_cache_entry(
+                                provider.name, self.language, identifier, "ERROR_PERMANENT",
+                                result_code="PROVIDER_ERROR", reason=str(exc)[:500],
+                            )
+                            self._record_result("PROVIDER_ERROR")
+                            continue
+                        except ArchiveTemporaryFailure as exc:
+                            set_provider_cache_entry(
+                                provider.name, self.language, identifier, "ERROR_TEMPORARY",
+                                reason=str(exc)[:500],
+                            )
+                            continue
+                        if eval_result is None:
+                            break
+                        movie, result = eval_result
+                        cache_fields = provider.cache_payload(movie, result)
+                        if cache_fields:
+                            set_provider_cache_entry(provider.name, self.language, identifier, **cache_fields)
+
                     if movie is None:
                         continue
                     progressed = True

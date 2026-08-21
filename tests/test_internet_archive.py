@@ -5,7 +5,9 @@ import pytest
 import requests
 
 from movie_manager import db
-from movie_manager.discovery import ACCEPTED_STATUSES, DiscoveryController
+from movie_manager.discovery import (
+    ACCEPTED_STATUSES, ArchiveTemporaryFailure, DiscoveryController,
+)
 from movie_manager.internet_archive import (
     METADATA_URL, SEARCH_URL, InternetArchiveError, InternetArchiveProvider,
 )
@@ -382,7 +384,7 @@ def test_temporary_provider_failure_retries(monkeypatch, isolated_db):
     controller.target = 1
     controller.job_id = None
     controller.downloadable_only = False
-    monkeypatch.setattr("movie_manager.discovery.NETWORK_RETRY_SECONDS", [0])
+    monkeypatch.setattr("movie_manager.discovery.ARCHIVE_NETWORK_RETRY_SECONDS", [0])
 
     state = _wire_provider(
         monkeypatch, _search_payload([_doc("retry1")]), {"retry1": _metadata()}, fail_first_n=1
@@ -417,3 +419,142 @@ def test_permanent_provider_error_is_skipped_not_fatal(monkeypatch, isolated_db)
     controller._run_archive()
 
     assert controller.status in {"COMPLETED"}
+
+
+# ---------------------------------------------------------------------------
+# Hardening: bounded retry, no infinite retry on permanent 4xx, caching
+# ---------------------------------------------------------------------------
+
+def test_archive_request_retries_on_502_and_timeouts(monkeypatch, isolated_db):
+    db.init_db()
+    controller = DiscoveryController()
+    controller.job_id = None
+    monkeypatch.setattr("movie_manager.discovery.ARCHIVE_NETWORK_RETRY_SECONDS", [0])
+
+    calls = {"n": 0}
+
+    def flaky_search(query, page=1, rows=50):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise requests.RequestException("simulated 502/timeout")
+        return [_doc("x")], 1
+
+    provider = InternetArchiveProvider()
+    monkeypatch.setattr(provider, "search_page", flaky_search)
+
+    result = controller._archive_request(provider.search_page, "Yoruba movie", 1)
+
+    assert calls["n"] == 3
+    assert result == ([_doc("x")], 1)
+    assert controller.stats["temporary_provider_errors"] == 2
+
+
+def test_no_infinite_retry_on_permanent_4xx(monkeypatch, isolated_db):
+    db.init_db()
+    controller = DiscoveryController()
+    controller.job_id = None
+
+    calls = {"n": 0}
+
+    def permanent_fail(*a, **k):
+        calls["n"] += 1
+        raise InternetArchiveError("permanent 404")
+
+    with pytest.raises(InternetArchiveError):
+        controller._archive_request(permanent_fail)
+
+    assert calls["n"] == 1  # never retried
+
+
+def test_archive_request_gives_up_after_max_attempts_not_forever(monkeypatch, isolated_db):
+    db.init_db()
+    controller = DiscoveryController()
+    controller.job_id = None
+    monkeypatch.setattr("movie_manager.discovery.ARCHIVE_NETWORK_RETRY_SECONDS", [0])
+
+    calls = {"n": 0}
+
+    def always_fails(*a, **k):
+        calls["n"] += 1
+        raise requests.RequestException("persistent network blip")
+
+    with pytest.raises(ArchiveTemporaryFailure):
+        controller._archive_request(always_fails, max_attempts=3)
+
+    assert calls["n"] == 3  # bounded, not infinite
+    assert controller.stats["temporary_provider_errors"] == 3
+
+
+def test_cached_metadata_is_not_fetched_repeatedly(monkeypatch, isolated_db):
+    db.init_db()
+    controller = DiscoveryController()
+    controller.language = "yoruba"
+    controller.target = 1
+    controller.job_id = None
+    controller.downloadable_only = False
+
+    _wire_provider(monkeypatch, _search_payload([_doc("cache1")], num_found=1), {"cache1": _metadata()})
+    _head_ok(monkeypatch)
+
+    controller._run_archive()
+    assert db.count_movies("yoruba", ACCEPTED_STATUSES) == 1
+
+    # A second run must never re-fetch metadata for "cache1" -- it's already
+    # a known row (movie_exists) and, independently, already cached. Any
+    # metadata request for it here would be a bug.
+    metadata_calls_for_cache1 = {"n": 0}
+
+    def guarded_get(url, params=None, timeout=None):
+        if url == SEARCH_URL:
+            return FakeResponse(200, _search_payload([_doc("cache1")], num_found=1))
+        if url == METADATA_URL.format(identifier="cache1"):
+            metadata_calls_for_cache1["n"] += 1
+        return FakeResponse(200, _metadata())
+
+    monkeypatch.setattr("movie_manager.internet_archive.requests.get", guarded_get)
+    controller.target = 5
+
+    controller._run_archive()
+
+    assert metadata_calls_for_cache1["n"] == 0
+    assert db.count_movies("yoruba", ACCEPTED_STATUSES) == 1  # no duplicate row created
+
+
+def test_permanent_rejection_is_cached_and_not_refetched(monkeypatch, isolated_db):
+    db.init_db()
+    from movie_manager.internet_archive import InternetArchiveProvider as Provider
+    provider = Provider()
+
+    state = _wire_provider(monkeypatch, _search_payload([]), {
+        "rej1": _metadata(title="American Drama", description="A Nigerian feature film.")
+    })
+
+    movie, result = provider.evaluate_candidate("rej1", _doc("rej1", title="American Drama"), "yoruba", "q", 3600)
+    assert result == "WRONG_LANGUAGE"
+
+    cache_fields = provider.cache_payload(movie, result)
+    db.set_provider_cache_entry(provider.name, "yoruba", "rej1", **cache_fields)
+
+    entry = db.get_provider_cache_entry(provider.name, "yoruba", "rej1")
+    assert entry["status"] == "REJECTED"
+    assert entry["result_code"] == "WRONG_LANGUAGE"
+
+    # A later caller can reconstruct the verdict from cache with zero network calls.
+    calls_before = state["calls"]
+    rebuilt_movie, rebuilt_result = provider.movie_from_cache("yoruba", "rej1", _doc("rej1"), "q", entry)
+    assert state["calls"] == calls_before  # no fetch happened
+    assert rebuilt_result == "WRONG_LANGUAGE"
+    assert rebuilt_movie["status"] == "REJECTED"
+
+
+def test_temporary_failure_is_retried_on_a_later_run(isolated_db):
+    db.init_db()
+    db.set_provider_cache_entry("internet_archive", "yoruba", "flaky1", "ERROR_TEMPORARY", reason="timeout")
+
+    entry = db.get_provider_cache_entry("internet_archive", "yoruba", "flaky1")
+    assert entry["status"] == "ERROR_TEMPORARY"
+    # ERROR_TEMPORARY must never be treated as a final cached verdict --
+    # the discovery/supply-scan loop's cache-hit check explicitly excludes it.
+    assert entry["status"] != "ERROR_PERMANENT"
+    is_final_cache_hit = entry["status"] != "ERROR_TEMPORARY"
+    assert is_final_cache_hit is False

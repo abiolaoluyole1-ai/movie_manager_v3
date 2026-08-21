@@ -88,6 +88,23 @@ def init_db():
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS provider_scan_cache (
+            provider TEXT NOT NULL,
+            language TEXT NOT NULL,
+            identifier TEXT NOT NULL,
+            status TEXT NOT NULL,
+            result_code TEXT,
+            reason TEXT,
+            title TEXT,
+            duration_seconds INTEGER,
+            licence TEXT,
+            rights_clear INTEGER,
+            download_url TEXT,
+            metadata_json TEXT,
+            checked_at TEXT NOT NULL,
+            PRIMARY KEY(provider, language, identifier)
+        );
         """)
         movie_columns = {row["name"] for row in conn.execute("PRAGMA table_info(movies)")}
         for column in ("default_audio_language", "default_language"):
@@ -457,6 +474,52 @@ def list_movie_ids(language, status=None, search="", limit=20000):
             params
         ).fetchall()
         return [r["id"] for r in rows]
+
+
+def get_provider_cache_entry(provider, language, identifier):
+    """Look up a previously-scanned provider candidate.
+
+    Status is one of ACCEPTED_READY, ACCEPTED_AMBIGUOUS, REJECTED,
+    ERROR_TEMPORARY, ERROR_PERMANENT. Every status except ERROR_TEMPORARY is
+    a final verdict a caller can reuse without re-fetching metadata;
+    ERROR_TEMPORARY means the previous attempt failed on a transient network
+    issue and should be retried on a later run.
+    """
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM provider_scan_cache WHERE provider=? AND language=? AND identifier=?",
+            (provider, language, identifier)
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def set_provider_cache_entry(
+    provider, language, identifier, status, result_code=None, reason=None,
+    title=None, duration_seconds=None, licence=None, rights_clear=None,
+    download_url=None, metadata_json=None,
+):
+    with _lock, connect() as conn:
+        conn.execute("""
+        INSERT INTO provider_scan_cache(
+            provider,language,identifier,status,result_code,reason,title,
+            duration_seconds,licence,rights_clear,download_url,metadata_json,checked_at
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(provider,language,identifier) DO UPDATE SET
+            status=excluded.status,
+            result_code=excluded.result_code,
+            reason=excluded.reason,
+            title=excluded.title,
+            duration_seconds=excluded.duration_seconds,
+            licence=excluded.licence,
+            rights_clear=excluded.rights_clear,
+            download_url=excluded.download_url,
+            metadata_json=excluded.metadata_json,
+            checked_at=excluded.checked_at
+        """, (
+            provider, language, identifier, status, result_code, reason, title,
+            duration_seconds, licence, (int(rights_clear) if rights_clear is not None else None),
+            download_url, metadata_json, now_iso()
+        ))
 
 
 def count_movies(language, statuses=None):

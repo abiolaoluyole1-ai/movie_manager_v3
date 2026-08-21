@@ -30,6 +30,11 @@ THUMBNAIL_URL = "https://archive.org/services/img/{identifier}"
 
 TEMPORARY_HTTP_STATUSES = {429, 500, 502, 503, 504}
 SEARCH_ROWS = 50
+DEFAULT_REQUEST_TIMEOUT = 45
+# Archive.org has shown itself slower and flakier than YouTube's API in
+# practice, so it gets its own (longer, more patient) bounded backoff table
+# instead of sharing NETWORK_RETRY_SECONDS with YouTube discovery.
+ARCHIVE_NETWORK_RETRY_SECONDS = [5, 10, 20, 40, 60, 90]
 
 # (extension, format-name hints) in preference order: MP4 first, then WebM,
 # MKV, and finally M4V/MOV.
@@ -58,6 +63,22 @@ CLEAR_RIGHTS_TEXT_HINTS = (
 
 _HMS_RE = re.compile(r"^(?:(\d+):)?(\d{1,2}):(\d{2})$")
 _MIN_RE = re.compile(r"(\d+)\s*min")
+# Same 2-4 digit block repeated 4+ times in a row -- the pattern seen in
+# known-spam Archive uploads (e.g. "2435724572457247247247247").
+_SPAM_REPEATING_DIGIT_RE = re.compile(r"(\d{2,4})\1{3,}")
+
+
+def _looks_like_spam_identifier(identifier):
+    """Very conservative: only flags identifiers that are ALL digits and
+    either unusually long or built from an obviously repeating digit block.
+    A word/slug-style identifier (e.g. "BolorunOpani") is never flagged, so
+    legitimate older films with unusual-looking identifiers are never
+    rejected on this basis alone."""
+    if not identifier or not identifier.isdigit():
+        return False
+    if len(identifier) >= 18:
+        return True
+    return bool(_SPAM_REPEATING_DIGIT_RE.search(identifier))
 
 
 def _parse_runtime(value):
@@ -87,7 +108,7 @@ class InternetArchiveError(RuntimeError):
 class InternetArchiveProvider:
     name = "internet_archive"
 
-    def __init__(self, session=None, request_timeout=25):
+    def __init__(self, session=None, request_timeout=DEFAULT_REQUEST_TIMEOUT):
         self._session = session or requests
         self.timeout = request_timeout
 
@@ -188,8 +209,77 @@ class InternetArchiveProvider:
                     continue
         return 0
 
+    def prescreen_doc(self, doc, language, query):
+        """Cheap, network-free rejection using only the search-result doc
+        fields already in hand -- no metadata fetch, no HEAD probe. Returns
+        (result_code, reason) if the candidate should be rejected outright
+        without ever hitting the archive.org metadata API, else None to
+        proceed to the (comparatively expensive) metadata fetch.
+
+        Deliberately narrow: only flags an obviously-spam identifier or a
+        title/description that already matches a known
+        compilation/trailer/clip/etc. phrase. Language is never judged here
+        -- the search snippet is too thin a signal, and the fuller
+        description in the real metadata is a much more reliable source of
+        evidence, so language stays a post-metadata-fetch check.
+        """
+        identifier = doc.get("identifier") or ""
+        if _looks_like_spam_identifier(identifier):
+            return "NOT_MOVIE", "SPAM_IDENTIFIER"
+
+        title = str(doc.get("title") or "").strip()
+        description = doc.get("description") or ""
+        if isinstance(description, list):
+            description = " ".join(str(d) for d in description)
+        description = str(description)
+        lowered = f"{title} {description}".lower()
+        title_lowered = title.lower()
+
+        compilation = find_compilation_phrase(title_lowered, description.lower())
+        if compilation:
+            scope, phrase = compilation
+            return "NOT_MOVIE", f"COMPILATION_{scope}:{phrase}"
+
+        blocked = find_blocked_term(lowered)
+        if blocked:
+            return "NOT_MOVIE", f"BLOCKED_TERM:{blocked}"
+
+        return None
+
+    def _prescreen_movie(self, identifier, doc, language, query, reason):
+        """A minimal movie dict for a prescreen-rejected candidate -- enough
+        to record/cache the rejection without ever having fetched metadata."""
+        title = str(doc.get("title") or identifier).strip()
+        description = doc.get("description") or ""
+        if isinstance(description, list):
+            description = " ".join(str(d) for d in description)
+        return {
+            "language": language,
+            "video_id": f"internet_archive:{identifier}",
+            "provider": self.name,
+            "title": title or identifier,
+            "normalised_title": normalise_title(title),
+            "description": str(description)[:5000],
+            "channel_id": None,
+            "channel_title": "Internet Archive",
+            "published_at": None,
+            "default_audio_language": None,
+            "default_language": None,
+            "duration_seconds": 0,
+            "thumbnail_url": THUMBNAIL_URL.format(identifier=identifier),
+            "youtube_url": DETAILS_URL.format(identifier=identifier),
+            "embeddable": False,
+            "licence": None,
+            "status": "REJECTED",
+            "rejection_reason": reason,
+            "download_status": "NOT_READY",
+            "source_query": query,
+        }
+
     def evaluate_candidate(self, identifier, doc, language, query, min_seconds):
-        """Full evaluation pipeline for one search result.
+        """Full evaluation pipeline for one search result: cheap prescreen
+        first, then (only if it survives) the metadata fetch and full
+        evaluation.
 
         Returns (movie_dict_or_None, result_code). result_code mirrors
         DiscoveryController._evaluate()'s vocabulary (ACCEPTED,
@@ -197,11 +287,25 @@ class InternetArchiveProvider:
         shared discovery loop can record stats identically for either
         provider.
         """
+        prescreened = self.prescreen_doc(doc, language, query)
+        if prescreened:
+            result_code, reason = prescreened
+            return self._prescreen_movie(identifier, doc, language, query, reason), result_code
+
         try:
             item = self.fetch_item_metadata(identifier)
         except InternetArchiveError:
             return None, "PROVIDER_ERROR"
 
+        return self.evaluate_metadata(identifier, doc, item, language, query, min_seconds)
+
+    def evaluate_metadata(self, identifier, doc, item, language, query, min_seconds):
+        """Evaluates an already-fetched metadata item (see
+        fetch_item_metadata). Split out from evaluate_candidate so a
+        cache-aware caller (the discovery loop, the supply scan) can reuse
+        a previously-cached metadata fetch and skip the network call
+        entirely for an identifier it has already seen.
+        """
         meta = item.get("metadata", {}) or {}
         files = item.get("files", []) or []
 
@@ -284,6 +388,60 @@ class InternetArchiveProvider:
 
         movie["status"] = "ACCEPTED"
         return movie, "ACCEPTED"
+
+    def movie_from_cache(self, language, identifier, doc, query, cache_entry):
+        """Reconstructs a movie dict + result code from a previously cached
+        verdict for this identifier -- no metadata fetch, no HEAD probe.
+        """
+        status = cache_entry["status"]
+        title = cache_entry.get("title") or doc.get("title") or identifier
+        movie = {
+            "language": language,
+            "video_id": f"internet_archive:{identifier}",
+            "provider": self.name,
+            "title": title,
+            "normalised_title": normalise_title(title),
+            "description": str(doc.get("description") or "")[:5000],
+            "channel_id": None,
+            "channel_title": "Internet Archive",
+            "published_at": None,
+            "default_audio_language": None,
+            "default_language": None,
+            "duration_seconds": cache_entry.get("duration_seconds") or 0,
+            "thumbnail_url": THUMBNAIL_URL.format(identifier=identifier),
+            "youtube_url": DETAILS_URL.format(identifier=identifier),
+            "embeddable": False,
+            "licence": cache_entry.get("licence"),
+            "status": "DISCOVERED",
+            "download_status": "NOT_READY",
+            "source_query": query,
+        }
+        if status in ("ACCEPTED_READY", "ACCEPTED_AMBIGUOUS"):
+            movie["status"] = "ACCEPTED"
+            movie["download_url"] = cache_entry.get("download_url")
+            movie["_rights_clear"] = status == "ACCEPTED_READY"
+            return movie, "ACCEPTED"
+        movie["status"] = "REJECTED"
+        movie["rejection_reason"] = cache_entry.get("reason")
+        return movie, cache_entry.get("result_code") or "NOT_MOVIE"
+
+    @staticmethod
+    def cache_payload(movie, result):
+        """Builds the set_provider_cache_entry(**payload) fields for a
+        freshly-evaluated candidate's result. Returns None if there's
+        nothing worth caching (e.g. movie is None)."""
+        if movie is None:
+            return None
+        if result == "ACCEPTED":
+            status = "ACCEPTED_READY" if movie.get("_rights_clear") else "ACCEPTED_AMBIGUOUS"
+        else:
+            status = "REJECTED"
+        return {
+            "status": status, "result_code": result, "reason": movie.get("rejection_reason"),
+            "title": movie.get("title"), "duration_seconds": movie.get("duration_seconds"),
+            "licence": movie.get("licence"), "rights_clear": movie.get("_rights_clear"),
+            "download_url": movie.get("download_url"),
+        }
 
 
 provider = InternetArchiveProvider()

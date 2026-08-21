@@ -65,6 +65,36 @@
           </section>
         </div>
 
+        <section class="panel glass">
+          <div class="panel-head"><div><p class="eyebrow">DIAGNOSTIC</p><h3>Scan provider supply</h3></div><span class="status-pill" id="supplyScanStatus">IDLE</span></div>
+          <p class="muted" style="margin-bottom:14px">Checks whether a provider realistically has enough qualifying movies for this language -- searches and safely probes direct file URLs, but never downloads a full file and never adds anything to your catalogue.</p>
+          <div class="controls" style="justify-content:flex-start">
+            <div class="field"><label>Max candidates</label><select id="supplyScanMax"><option value="50">50</option><option value="100">100</option><option value="250" selected>250</option><option value="500">500</option></select></div>
+            <button class="btn primary" id="supplyScanStartBtn">Scan provider supply</button>
+            <button class="btn danger-ghost hidden" id="supplyScanStopBtn">Stop</button>
+          </div>
+          <div class="detail-grid" style="margin-top:16px">
+            <div><span>Searched</span><b id="ssSearched">0</b></div>
+            <div><span>Metadata checked</span><b id="ssChecked">0</b></div>
+            <div><span>Qualifying 60+min</span><b id="ssQualifying">0</b></div>
+            <div><span>Source ready</span><b id="ssReady">0</b></div>
+            <div><span>Under 60m</span><b id="ssUnder">0</b></div>
+            <div><span>Wrong language</span><b id="ssWrongLang">0</b></div>
+            <div><span>Not movie</span><b id="ssNotMovie">0</b></div>
+            <div><span>Compilation/trailer</span><b id="ssCompilation">0</b></div>
+            <div><span>Duplicate</span><b id="ssDuplicate">0</b></div>
+            <div><span>Ambiguous rights</span><b id="ssAmbiguous">0</b></div>
+            <div><span>No video file</span><b id="ssNoFile">0</b></div>
+            <div><span>Temp Archive errors</span><b id="ssTempErr">0</b></div>
+            <div><span>Permanent errors</span><b id="ssPermErr">0</b></div>
+          </div>
+          <div class="current-task"><span>NOW</span><strong id="supplyScanQuery">Waiting to start</strong><small id="supplyScanMessage">Not started yet.</small></div>
+          <div class="activity" id="supplyScanResultsWrap" style="display:none">
+            <div class="activity-head"><strong>Qualifying (SOURCE_READY) titles</strong></div>
+            <div id="supplyScanResults" class="activity-log"></div>
+          </div>
+        </section>
+
         <section class="panel glass"><div class="panel-head"><div><p class="eyebrow">RECENTLY FOUND</p><h3>Movie cards</h3></div><button class="text-btn" data-go="movies">View all</button></div><div class="movie-grid" id="recentMovies"></div></section>
       </section>
 

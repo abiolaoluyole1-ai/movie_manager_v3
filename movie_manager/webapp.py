@@ -18,6 +18,7 @@ from .language_profiles import PROFILES
 from .runtime import runtime
 from .source_adapters import resolver
 from .source_mappings import import_mapping_entries, parse_csv_mapping, parse_json_mapping
+from .supply_scan import SUPPLY_SCAN_PROVIDERS
 from .utils import format_duration, is_direct_http_candidate, is_http_url
 
 ACCEPTED = ["ACCEPTED", "QUEUED", "DOWNLOADING", "DOWNLOADED"]
@@ -167,6 +168,38 @@ def create_app():
         )
         reset_search_state(language)
         return jsonify({"ok": True})
+
+    @app.post("/api/supply-scan/start")
+    def supply_scan_start():
+        """Diagnostic-only: searches and checks metadata/rights/direct-URL
+        reachability for up to max_candidates items. Never writes to the
+        movies table and never downloads a full file."""
+        data = request.get_json(force=True)
+        language = data.get("language") or get_setting("active_language", "yoruba")
+        provider = data.get("provider", "internet_archive")
+        max_candidates = data.get("max_candidates", 250)
+        if provider not in SUPPLY_SCAN_PROVIDERS:
+            return jsonify({
+                "ok": False, "error": f"Supply scan does not support provider '{provider}' yet."
+            }), 400
+        try:
+            max_candidates = int(max_candidates)
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "max_candidates must be a number."}), 400
+        try:
+            runtime.start_supply_scan(language, provider, max_candidates)
+        except Exception as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        return jsonify({"ok": True, "supply_scan": runtime.supply_scan.snapshot()})
+
+    @app.post("/api/supply-scan/stop")
+    def supply_scan_stop():
+        runtime.stop_supply_scan()
+        return jsonify({"ok": True})
+
+    @app.get("/api/supply-scan/status")
+    def supply_scan_status():
+        return jsonify(runtime.supply_scan.snapshot())
 
     @app.post("/api/movies/<int:movie_id>/reject")
     def movie_reject(movie_id):

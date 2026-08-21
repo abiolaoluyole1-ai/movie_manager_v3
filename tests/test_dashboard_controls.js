@@ -136,7 +136,7 @@ assertEqual(T.els.secondaryStopBtn.classList.contains("hidden"), true, "ERROR hi
 // 8. Network-wait state does not require manual Resume; Stop still available
 T.state.runtime.discovery = { status: "RUNNING", network_wait: true };
 T.renderDashboardControls();
-assertEqual(T.els.primaryActionBtn.textContent, "Waiting for network…", "waiting-network label");
+assertEqual(T.els.primaryActionBtn.textContent, "Waiting for internet…", "waiting-network label");
 assertEqual(T.els.primaryActionBtn.disabled, true, "waiting-network primary is disabled");
 assertEqual(T.els.secondaryStopBtn.classList.contains("hidden"), false, "waiting-network still shows Stop");
 

@@ -11,8 +11,8 @@
   <div class="shell">
     <aside class="sidebar glass">
       <div class="brand"><div class="brand-mark">▶</div><div><strong>Movie Manager</strong><small>V3 • Local</small></div></div>
-      <nav>
-        <button class="nav-item active" data-view="dashboard">Dashboard</button>
+      <nav aria-label="Main navigation">
+        <button class="nav-item active" data-view="dashboard" aria-current="page">Dashboard</button>
         <button class="nav-item" data-view="movies">Movies</button>
         <button class="nav-item" data-view="downloads">Downloads</button>
         <button class="nav-item" data-view="settings">Settings</button>
@@ -23,19 +23,39 @@
     <main>
       <header class="topbar">
         <div><p class="eyebrow">LOCAL MOVIE AUTOMATION</p><h1 id="pageTitle">Dashboard</h1></div>
-        <div class="language-wrap glass"><label>Language</label><select id="languageSelect"></select></div>
+        <div class="language-wrap glass"><label for="languageSelect">Language</label><select id="languageSelect"></select></div>
       </header>
 
       <section id="view-dashboard" class="view active">
         <div class="hero glass">
           <div><p class="eyebrow">CURRENT RUN</p><h2>Discover real full-length movies.</h2><p class="muted">60+ minutes. Clips, trailers, interviews, reviews, music and obvious non-movies are rejected.</p></div>
           <div class="controls">
-            <div class="field"><label>Target</label><input id="targetInput" type="number" min="1" value="30"></div>
-            <div class="field"><label>Mode</label><select id="modeSelect"><option value="discover">Discover only</option><option value="download">Download only</option><option value="both">Discover + Download</option></select></div>
-            <div class="field"><label>Source</label><select id="providerSelect"><option value="youtube">YouTube</option><option value="internet_archive">Internet Archive</option></select></div>
+            <div class="field"><label for="targetInput">Target</label><input id="targetInput" type="number" min="1" value="30"></div>
+            <div class="field"><label for="modeSelect">Mode</label><select id="modeSelect"><option value="discover">Discover only</option><option value="download">Download only</option><option value="both">Discover + Download</option></select></div>
+            <div class="field"><label for="providerSelect">Source</label><select id="providerSelect"><option value="youtube">YouTube</option><option value="internet_archive">Internet Archive</option></select></div>
             <button class="btn primary" id="primaryActionBtn">Start</button><button class="btn danger-ghost hidden" id="secondaryStopBtn">Stop</button>
           </div>
         </div>
+
+        <div id="dashboardStateBanner" class="state-banner hidden" role="status"></div>
+
+        <section class="progress-hero glass" aria-live="polite">
+          <p class="progress-hero-title" id="heroProgressTitle">Getting your movies ready</p>
+          <p class="progress-hero-sub" id="heroProgressSub">Choose a target and press Start to begin.</p>
+          <div class="progress-hero-row">
+            <span class="progress-hero-count" id="heroProgressCount">0 <small>of 0 ready</small></span>
+            <span class="progress-hero-pct" id="heroProgressPct">0%</span>
+          </div>
+          <div class="progress-track"><div class="progress-fill" id="heroProgressFill"></div></div>
+          <div class="progress-row"><span>Status</span><strong id="heroStatusText">Idle</strong></div>
+        </section>
+
+        <section class="panel glass">
+          <div class="panel-head"><div><p class="eyebrow">DOWNLOADS</p><h3>Downloading now</h3></div><span class="status-pill" id="downloadStatus">IDLE</span></div>
+          <div id="downloadStateBanner" class="state-banner hidden" role="status"></div>
+          <div class="download-summary" id="downloadSummary">No downloads running yet.</div>
+          <div class="active-jobs-grid" id="activeJobsGrid"></div>
+        </section>
 
         <div class="stat-grid">
           <article class="stat glass"><span>Target</span><strong id="statTarget">0</strong></article>
@@ -43,8 +63,6 @@
           <article class="stat glass"><span>Downloadable</span><strong id="statDownloadable">0</strong></article>
           <article class="stat glass"><span>Downloaded</span><strong id="statDownloaded">0</strong></article>
           <article class="stat glass"><span>Remaining</span><strong id="statRemaining">0</strong></article>
-          <article class="stat glass"><span>Source missing</span><strong id="statSourceMissing">0</strong></article>
-          <article class="stat glass"><span>Source invalid</span><strong id="statSourceInvalid">0</strong></article>
         </div>
 
         <div class="grid-two">
@@ -52,16 +70,18 @@
             <div class="panel-head"><div><p class="eyebrow">DISCOVERY</p><h3>Live progress</h3></div><span class="status-pill" id="discoveryStatus">IDLE</span></div>
             <div class="progress-track"><div class="progress-fill" id="discoveryBar"></div></div>
             <div class="progress-row"><strong id="discoveryProgressText">0 / 0</strong><span id="discoveryPercent">0%</span></div>
-            <div class="detail-grid">
-              <div><span>Scanned</span><b id="scannedCount">0</b></div><div><span>Under 60m</span><b id="underCount">0</b></div><div><span>Not movie</span><b id="notMovieCount">0</b></div><div><span>Wrong language</span><b id="wrongLanguageCount">0</b></div><div><span>Duplicates</span><b id="duplicateCount">0</b></div><div><span>API requests</span><b id="apiCount">0</b></div><div><span>Auto retries</span><b id="retryCount">0</b></div>
-            </div>
-            <div class="current-task"><span>NOW</span><strong id="currentQuery">Waiting to start</strong><small id="discoveryMessage">Your progress is saved in SQLite.</small></div>
+            <div class="current-task"><span>NOW</span><strong id="currentQuery">Waiting to start</strong><small id="discoveryMessage">Your progress is saved automatically.</small></div>
+            <details class="advanced-block">
+              <summary>Advanced discovery details</summary>
+              <div class="detail-grid">
+                <div><span>Scanned</span><b id="scannedCount">0</b></div><div><span>Under 60m</span><b id="underCount">0</b></div><div><span>Not movie</span><b id="notMovieCount">0</b></div><div><span>Wrong language</span><b id="wrongLanguageCount">0</b></div><div><span>Duplicates</span><b id="duplicateCount">0</b></div><div><span>API requests</span><b id="apiCount">0</b></div><div><span>Auto retries</span><b id="retryCount">0</b></div><div><span>Source missing</span><b id="statSourceMissing">0</b></div><div><span>Source invalid</span><b id="statSourceInvalid">0</b></div>
+              </div>
+            </details>
           </section>
 
           <section class="panel glass">
-            <div class="panel-head"><div><p class="eyebrow">DOWNLOADS</p><h3>Detailed status</h3></div><span class="status-pill" id="downloadStatus">IDLE</span></div>
-            <div class="download-summary" id="downloadSummary">No authorised local-file downloads queued.</div>
-            <div class="activity"><div class="activity-head"><strong>Live activity</strong><button class="text-btn" id="clearActivity">Clear</button></div><div id="activityLog" class="activity-log"></div></div>
+            <div class="panel-head"><div><p class="eyebrow">ACTIVITY</p><h3>Live log</h3></div></div>
+            <div class="activity"><div class="activity-head"><strong>What's happening</strong><button class="text-btn" id="clearActivity">Clear</button></div><div id="activityLog" class="activity-log"></div></div>
           </section>
         </div>
 
@@ -73,35 +93,38 @@
             <button class="btn primary" id="supplyScanStartBtn">Scan provider supply</button>
             <button class="btn danger-ghost hidden" id="supplyScanStopBtn">Stop</button>
           </div>
-          <div class="detail-grid" style="margin-top:16px">
-            <div><span>Searched</span><b id="ssSearched">0</b></div>
-            <div><span>Metadata checked</span><b id="ssChecked">0</b></div>
-            <div><span>Qualifying 60+min</span><b id="ssQualifying">0</b></div>
-            <div><span>Source ready</span><b id="ssReady">0</b></div>
-            <div><span>Under 60m</span><b id="ssUnder">0</b></div>
-            <div><span>Wrong language</span><b id="ssWrongLang">0</b></div>
-            <div><span>Not movie</span><b id="ssNotMovie">0</b></div>
-            <div><span>Compilation/trailer</span><b id="ssCompilation">0</b></div>
-            <div><span>Duplicate</span><b id="ssDuplicate">0</b></div>
-            <div><span>Ambiguous rights</span><b id="ssAmbiguous">0</b></div>
-            <div><span>No video file</span><b id="ssNoFile">0</b></div>
-            <div><span>Temp Archive errors</span><b id="ssTempErr">0</b></div>
-            <div><span>Permanent errors</span><b id="ssPermErr">0</b></div>
-          </div>
           <div class="current-task"><span>NOW</span><strong id="supplyScanQuery">Waiting to start</strong><small id="supplyScanMessage">Not started yet.</small></div>
+          <details class="advanced-block">
+            <summary>Scan details</summary>
+            <div class="detail-grid">
+              <div><span>Searched</span><b id="ssSearched">0</b></div>
+              <div><span>Metadata checked</span><b id="ssChecked">0</b></div>
+              <div><span>Qualifying 60+min</span><b id="ssQualifying">0</b></div>
+              <div><span>Source ready</span><b id="ssReady">0</b></div>
+              <div><span>Under 60m</span><b id="ssUnder">0</b></div>
+              <div><span>Wrong language</span><b id="ssWrongLang">0</b></div>
+              <div><span>Not movie</span><b id="ssNotMovie">0</b></div>
+              <div><span>Compilation/trailer</span><b id="ssCompilation">0</b></div>
+              <div><span>Duplicate</span><b id="ssDuplicate">0</b></div>
+              <div><span>Ambiguous rights</span><b id="ssAmbiguous">0</b></div>
+              <div><span>No video file</span><b id="ssNoFile">0</b></div>
+              <div><span>Temp Archive errors</span><b id="ssTempErr">0</b></div>
+              <div><span>Permanent errors</span><b id="ssPermErr">0</b></div>
+            </div>
+          </details>
           <div class="activity" id="supplyScanResultsWrap" style="display:none">
             <div class="activity-head"><strong>Qualifying (SOURCE_READY) titles</strong></div>
             <div id="supplyScanResults" class="activity-log"></div>
           </div>
         </section>
 
-        <section class="panel glass"><div class="panel-head"><div><p class="eyebrow">RECENTLY FOUND</p><h3>Movie cards</h3></div><button class="text-btn" data-go="movies">View all</button></div><div class="movie-grid" id="recentMovies"></div></section>
+        <section class="panel glass"><div class="panel-head"><div><p class="eyebrow">RECENTLY FOUND</p><h3>Movie cards</h3></div><button class="text-btn" data-go="movies">View all</button></div><div class="movie-grid" id="recentMovies"><div class="skeleton skeleton-card"></div><div class="skeleton skeleton-card"></div><div class="skeleton skeleton-card"></div></div></section>
       </section>
 
       <section id="view-movies" class="view">
         <section class="panel glass">
-          <div class="panel-head stack-mobile"><div><p class="eyebrow">CATALOGUE</p><h3 id="moviesTitle">Movies</h3></div><div class="toolbar"><input id="movieSearch" placeholder="Search title or channel"><select id="movieStatusFilter"><option value="ALL">All</option><option value="ACCEPTED">Accepted</option><option value="REJECTED">Rejected</option><option value="DOWNLOADED">Downloaded</option></select><button class="btn" id="resolveSourcesBtn">Resolve download sources</button><button class="btn" id="refreshMovies">Refresh</button></div></div>
-          <div class="bulk-bar glass">
+          <div class="panel-head stack-mobile"><div><p class="eyebrow">CATALOGUE</p><h3 id="moviesTitle">Movies</h3></div><div class="toolbar"><input id="movieSearch" placeholder="Search title or channel" aria-label="Search movies by title or channel"><select id="movieStatusFilter" aria-label="Filter movies by status"><option value="ALL">All</option><option value="ACCEPTED">Accepted</option><option value="REJECTED">Rejected</option><option value="DOWNLOADED">Downloaded</option></select><button class="btn" id="resolveSourcesBtn">Resolve download sources</button><button class="btn" id="refreshMovies">Refresh</button></div></div>
+          <div class="bulk-bar glass" id="bulkBar">
             <div class="bulk-select-group">
               <button class="btn" id="selectPageBtn">Select page</button>
               <button class="btn" id="selectAllFilteredBtn">Select all filtered results</button>
@@ -120,37 +143,71 @@
 
       <section id="view-downloads" class="view">
         <section class="panel glass">
-          <div class="panel-head"><div><p class="eyebrow">LOCAL STORAGE</p><h3>Download queue</h3></div><div class="toolbar"><button class="btn primary" id="downloadPrimaryBtn">Start downloads</button><button class="btn danger-ghost hidden" id="downloadStopBtn">Stop</button></div></div>
-          <div class="notice"><strong>Local downloading:</strong> V3 can save files from authorised/direct HTTP(S) movie-file sources. A normal YouTube watch URL is metadata/playback only and is not treated as a direct MP4 source.</div>
-          <div class="movie-grid" id="downloadMovies"></div>
+          <div class="panel-head stack-mobile"><div><p class="eyebrow">DOWNLOADS</p><h3>Download queue</h3></div><div class="toolbar"><button class="btn primary" id="downloadPrimaryBtn">Start downloads</button><button class="btn danger-ghost hidden" id="downloadStopBtn">Stop</button></div></div>
+          <div id="downloadsPageStateBanner" class="state-banner hidden" role="status"></div>
+          <div class="notice">Movie Manager saves completed movies straight into your download folder. A YouTube page link on its own can't be saved as a file -- only a movie with an authorised direct source can be downloaded.</div>
+          <div class="download-groups">
+            <div>
+              <div class="download-group-head"><h4>Downloading now</h4><span class="download-group-count" id="dgDownloadingCount">0</span></div>
+              <div class="download-row-list" id="dgDownloading"></div>
+            </div>
+            <div>
+              <div class="download-group-head"><h4>Queued</h4><span class="download-group-count" id="dgQueuedCount">0</span></div>
+              <div class="download-row-list" id="dgQueued"></div>
+            </div>
+            <div>
+              <div class="download-group-head"><h4>Completed</h4><span class="download-group-count" id="dgCompletedCount">0</span></div>
+              <div class="download-row-list" id="dgCompleted"></div>
+            </div>
+            <div>
+              <div class="download-group-head"><h4>Could not download</h4><span class="download-group-count" id="dgFailedCount">0</span></div>
+              <div class="download-row-list" id="dgFailed"></div>
+            </div>
+          </div>
         </section>
       </section>
 
       <section id="view-settings" class="view">
         <section class="panel glass settings-panel">
           <div><p class="eyebrow">SETTINGS</p><h3>Local application</h3></div>
-          <div class="setting-row"><div><strong>Minimum movie duration</strong><p>V3 is locked to 60 minutes for Yoruba discovery.</p></div><input id="minimumDuration" type="number" value="60" disabled></div>
-          <div class="setting-row"><div><strong>Maintain target automatically</strong><p>If you reject a movie, discovery can find a replacement.</p></div><label class="switch"><input id="maintainTarget" type="checkbox" checked><span></span></label></div>
-          <div class="setting-row"><div><strong>Count only downloadable movies toward target</strong><p>When on, Target counts movies whose source is Ready or already Downloaded, not just Accepted. Discovery will keep scanning past the target's accepted count until enough movies are actually downloadable.</p></div><label class="switch"><input id="countOnlyDownloadable" type="checkbox"><span></span></label></div>
-          <div class="setting-row"><div><strong>Simultaneous downloads</strong><p>How many movies can download at the same time. A finished movie's slot is refilled immediately.</p></div><select id="maxConcurrentDownloads"><option value="1">1</option><option value="2">2</option><option value="3" selected>3</option><option value="4">4</option><option value="5">5</option><option value="6">6</option><option value="7">7</option></select></div>
-          <div class="setting-row"><div><strong>Minimum free disk space (GB)</strong><p>Downloads pause automatically -- without touching what's already saved -- when free space on the destination drive falls below this.</p></div><input id="minFreeDiskGb" type="number" min="1" step="1" value="20"></div>
-          <div class="setting-row vertical"><div><strong>Download folder</strong><p>Completed files are placed inside language folders such as Yoruba, Igbo and Hausa.</p></div><div class="path-row"><input id="downloadRoot" placeholder="C:\Movies\Movie Manager"><button class="btn" id="chooseFolder">Choose folder</button><button class="btn primary" id="saveSettings">Save</button></div></div>
-          <div class="setting-row"><div><strong>YouTube Data API</strong><p>Your private key stays inside the local <code>.env</code> file and is never shown here.</p></div><span class="status-pill" id="apiConfigured">CHECKING</span></div>
-          <div class="setting-row vertical">
-            <div><strong>Import download sources</strong><p>Paste a CSV (<code>video_id,download_url</code>) or a JSON mapping to add authorised local-file sources in bulk. This never starts a download automatically.</p></div>
-            <div class="import-row">
-              <select id="importFormat"><option value="csv">CSV</option><option value="json">JSON</option></select>
-              <textarea id="importContent" rows="5" placeholder="video_id,download_url&#10;abc123,https://example.com/movie1.mp4"></textarea>
-              <button class="btn primary" id="importSourcesBtn">Import</button>
-            </div>
-            <div class="import-result" id="importResult"></div>
+
+          <div class="settings-section">
+            <div class="settings-section-head"><h4>General</h4><p>Basic behaviour for how Movie Manager builds your catalogue.</p></div>
+            <div class="setting-row"><div><strong>Minimum movie duration</strong><p>Movie Manager only keeps full-length movies (60+ minutes).</p></div><input id="minimumDuration" type="number" value="60" disabled aria-label="Minimum movie duration in minutes"></div>
+            <div class="setting-row"><div><strong>Maintain target automatically</strong><p>If you remove a movie, Movie Manager can look for a replacement on its own.</p></div><label class="switch"><input id="maintainTarget" type="checkbox" checked aria-label="Maintain target automatically"><span></span></label></div>
+            <div class="setting-row"><div><strong>Count only downloadable movies toward target</strong><p>When on, your target only counts movies that are ready or already downloaded, not just found.</p></div><label class="switch"><input id="countOnlyDownloadable" type="checkbox" aria-label="Count only downloadable movies toward target"><span></span></label></div>
           </div>
+
+          <div class="settings-section">
+            <div class="settings-section-head"><h4>Downloads</h4><p>Where movies are saved and how many download at once.</p></div>
+            <div class="setting-row"><div><strong>Simultaneous downloads</strong><p>How many movies Movie Manager can download at the same time. A finished movie's slot is filled immediately by the next one.</p></div><select id="maxConcurrentDownloads" aria-label="Simultaneous downloads"><option value="1">1</option><option value="2">2</option><option value="3" selected>3</option><option value="4">4</option><option value="5">5</option><option value="6">6</option><option value="7">7</option></select></div>
+            <div class="setting-row"><div><strong>Minimum free disk space (GB)</strong><p>Downloads pause automatically -- without touching what's already saved -- when free space on the download drive falls below this.</p></div><input id="minFreeDiskGb" type="number" min="1" step="1" value="20" aria-label="Minimum free disk space in gigabytes"></div>
+            <div class="setting-row vertical"><div><strong>Download folder</strong><p>Completed files are placed inside language folders such as Yoruba, Igbo and Hausa.</p></div><div class="path-row"><input id="downloadRoot" placeholder="C:\Movies\Movie Manager" aria-label="Download folder path"><button class="btn" id="chooseFolder">Choose folder</button><button class="btn primary" id="saveSettings">Save</button></div></div>
+          </div>
+
+          <div class="settings-section">
+            <div class="settings-section-head"><h4>Sources</h4><p>Where Movie Manager looks for movies.</p></div>
+            <div class="setting-row"><div><strong>YouTube connection</strong><p>Your private key stays inside the local <code>.env</code> file and is never shown here.</p></div><span class="status-pill" id="apiConfigured">CHECKING</span></div>
+          </div>
+
+          <details class="advanced-block settings-section">
+            <summary><strong>Advanced</strong></summary>
+            <div class="setting-row vertical">
+              <div><strong>Import download sources</strong><p>Paste a CSV (<code>video_id,download_url</code>) or a JSON mapping to add authorised local-file sources in bulk. This never starts a download automatically.</p></div>
+              <div class="import-row">
+                <select id="importFormat" aria-label="Import format"><option value="csv">CSV</option><option value="json">JSON</option></select>
+                <textarea id="importContent" rows="5" placeholder="video_id,download_url&#10;abc123,https://example.com/movie1.mp4" aria-label="Import content"></textarea>
+                <button class="btn primary" id="importSourcesBtn">Import</button>
+              </div>
+              <div class="import-result" id="importResult"></div>
+            </div>
+          </details>
         </section>
       </section>
     </main>
   </div>
 
-  <div class="modal hidden" id="movieModal"><div class="modal-backdrop" data-close-modal></div><article class="modal-card glass"><button class="modal-close" data-close-modal>×</button><div id="modalBody"></div></article></div>
+  <div class="modal hidden" id="movieModal" role="dialog" aria-modal="true" aria-label="Movie details"><div class="modal-backdrop" data-close-modal></div><article class="modal-card glass"><button class="modal-close" data-close-modal aria-label="Close movie details">×</button><div id="modalBody"></div></article></div>
   <div class="toast-wrap" id="toastWrap"></div>
   <script src="/static/app.js"></script>
 </body>

@@ -254,11 +254,40 @@ def test_download_start_does_not_create_duplicate_worker_when_running(monkeypatc
 
     monkeypatch.setattr("movie_manager.download.threading.Thread", TrackedAliveThread)
 
-    controller.start("yoruba")
-    controller.start("yoruba")
+    controller.start("yoruba", concurrency=1)
+    controller.start("yoruba", concurrency=1)
 
     assert len(thread_calls) == 1
     assert controller.status == "RUNNING"
+
+
+def test_download_start_spawns_one_worker_per_concurrency_slot(monkeypatch):
+    controller = DownloadController()
+    thread_calls = []
+
+    class TrackedAliveThread(AliveThread):
+        def __init__(self, **kwargs):
+            thread_calls.append(kwargs)
+            super().__init__(**kwargs)
+
+    monkeypatch.setattr("movie_manager.download.threading.Thread", TrackedAliveThread)
+
+    controller.start("yoruba", concurrency=5)
+
+    assert len(thread_calls) == 5
+    assert controller.concurrency == 5
+
+
+def test_download_start_clamps_concurrency_to_allowed_range(monkeypatch):
+    monkeypatch.setattr("movie_manager.download.threading.Thread", DeadThread)
+
+    low = DownloadController()
+    low.start("yoruba", concurrency=0)
+    assert low.concurrency == 1
+
+    high = DownloadController()
+    high.start("yoruba", concurrency=99)
+    assert high.concurrency == 7
 
 
 def test_download_run_sets_error_status_on_unexpected_exception(monkeypatch):

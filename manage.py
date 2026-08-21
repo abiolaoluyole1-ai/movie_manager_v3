@@ -5,7 +5,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from movie_manager.db import all_video_ids, init_db, get_setting, set_setting, count_movies
+from movie_manager.db import (
+    all_video_ids, init_db, get_setting, set_setting, count_movies, reset_interrupted_downloads,
+)
 from movie_manager.runtime import runtime
 from movie_manager.source_mappings import import_mapping_entries, parse_csv_mapping, parse_json_mapping
 
@@ -32,6 +34,7 @@ def main():
 
     args = parser.parse_args()
     init_db()
+    reset_interrupted_downloads()
 
     if args.command == "init":
         print("Database initialised.")

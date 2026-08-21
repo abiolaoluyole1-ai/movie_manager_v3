@@ -5,12 +5,13 @@ from pathlib import Path
 
 from flask import Flask, Response, jsonify, render_template, request, send_file
 
+from .config import clamp_concurrency, clamp_min_free_disk_gb
 from .db import (
     all_settings, all_video_ids, apply_source_resolution, bulk_reject_movies,
     bulk_restore_movies, count_downloadable, count_movies, counts, get_movie,
     get_setting, init_db, list_movie_ids, list_movies, list_movies_for_source_resolution,
-    reject_movie, reset_search_state, restore_movie, retry_download,
-    set_download_source, set_setting, source_status_counts,
+    reject_movie, reset_search_state, restore_movie,
+    retry_download, set_download_source, set_setting, source_status_counts,
 )
 from .discovery import DISCOVERY_PROVIDERS
 from .events import events
@@ -367,7 +368,8 @@ def create_app():
         language = (request.get_json(silent=True) or {}).get(
             "language", get_setting("active_language", "yoruba")
         )
-        runtime.download.start(language)
+        concurrency = clamp_concurrency(get_setting("max_concurrent_downloads"))
+        runtime.download.start(language, concurrency=concurrency)
         return jsonify({"ok": True})
 
     @app.post("/api/downloads/pause")
@@ -388,11 +390,18 @@ def create_app():
     @app.post("/api/settings")
     def settings_update():
         data = request.get_json(force=True)
-        allowed = {"active_language", "maintain_target", "download_root", "count_only_downloadable"}
+        allowed = {
+            "active_language", "maintain_target", "download_root", "count_only_downloadable",
+            "max_concurrent_downloads", "min_free_disk_gb",
+        }
         for key, value in data.items():
             if key in allowed:
                 if key == "download_root":
                     Path(str(value)).expanduser().mkdir(parents=True, exist_ok=True)
+                elif key == "max_concurrent_downloads":
+                    value = clamp_concurrency(value)
+                elif key == "min_free_disk_gb":
+                    value = clamp_min_free_disk_gb(value)
                 set_setting(key, value)
         return jsonify({"ok": True, "settings": all_settings()})
 

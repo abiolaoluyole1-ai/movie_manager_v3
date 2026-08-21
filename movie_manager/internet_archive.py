@@ -14,6 +14,7 @@ column, so the existing UNIQUE(language, video_id) constraint and
 movie_exists() dedup logic keep working unchanged for both providers.
 """
 import re
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from pathlib import Path
 from urllib.parse import quote
 
@@ -35,6 +36,13 @@ DEFAULT_REQUEST_TIMEOUT = 45
 # practice, so it gets its own (longer, more patient) bounded backoff table
 # instead of sharing NETWORK_RETRY_SECONDS with YouTube discovery.
 ARCHIVE_NETWORK_RETRY_SECONDS = [5, 10, 20, 40, 60, 90]
+# requests' own `timeout` bounds connect time and time-between-reads, but not
+# total wall-clock time for a slow-trickling response -- a server that keeps
+# sending a few bytes every few seconds can hold a connection open well past
+# DEFAULT_REQUEST_TIMEOUT. This hard ceiling on the whole request bounds that
+# so one stalled candidate can never stall an entire discovery/supply scan.
+DEFAULT_REQUEST_WATCHDOG_SECONDS = 90
+_WATCHDOG_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix="ia-request-watchdog")
 
 # (extension, format-name hints) in preference order: MP4 first, then WebM,
 # MKV, and finally M4V/MOV.
@@ -108,16 +116,26 @@ class InternetArchiveError(RuntimeError):
 class InternetArchiveProvider:
     name = "internet_archive"
 
-    def __init__(self, session=None, request_timeout=DEFAULT_REQUEST_TIMEOUT):
+    def __init__(self, session=None, request_timeout=DEFAULT_REQUEST_TIMEOUT,
+                 request_watchdog_seconds=DEFAULT_REQUEST_WATCHDOG_SECONDS):
         self._session = session or requests
         self.timeout = request_timeout
+        self.request_watchdog_seconds = request_watchdog_seconds
 
     def _get(self, url, params=None):
-        """One HTTP GET. Raises requests.RequestException for temporary/
-        network-level failures (including HTTP 429/5xx) so the caller's
-        existing retry/backoff loop handles them; raises
-        InternetArchiveError for permanent failures."""
-        response = self._session.get(url, params=params, timeout=self.timeout)
+        """One HTTP GET, bounded by an outer wall-clock watchdog in addition
+        to requests' own connect/read timeout (see
+        DEFAULT_REQUEST_WATCHDOG_SECONDS). Raises requests.RequestException
+        for temporary/network-level failures (including HTTP 429/5xx, and a
+        watchdog trip) so the caller's existing retry/backoff loop handles
+        them; raises InternetArchiveError for permanent failures."""
+        future = _WATCHDOG_POOL.submit(self._session.get, url, params=params, timeout=self.timeout)
+        try:
+            response = future.result(timeout=self.request_watchdog_seconds)
+        except FutureTimeoutError:
+            raise requests.RequestException(
+                f"Internet Archive request exceeded {self.request_watchdog_seconds}s watchdog limit"
+            )
         if response.status_code in TEMPORARY_HTTP_STATUSES:
             raise requests.RequestException(f"Temporary Internet Archive error {response.status_code}")
         if response.status_code >= 400:

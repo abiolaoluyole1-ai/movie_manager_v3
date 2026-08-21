@@ -558,3 +558,64 @@ def test_temporary_failure_is_retried_on_a_later_run(isolated_db):
     assert entry["status"] != "ERROR_PERMANENT"
     is_final_cache_hit = entry["status"] != "ERROR_TEMPORARY"
     assert is_final_cache_hit is False
+
+
+# ---------------------------------------------------------------------------
+# Outer request watchdog: a request that stalls beyond requests' own
+# connect/read timeout (e.g. a slow-trickle response) must not be able to
+# hold a discovery/supply scan open indefinitely -- this is what caused the
+# earlier real scan to stop 4 short of its 250-candidate budget.
+# ---------------------------------------------------------------------------
+
+class _HangingSession:
+    """Fakes a request that never returns within the watchdog window."""
+
+    def __init__(self, hang_seconds):
+        self.hang_seconds = hang_seconds
+        self.calls = 0
+
+    def get(self, url, params=None, timeout=None):
+        import time
+        self.calls += 1
+        time.sleep(self.hang_seconds)
+        return FakeResponse(200, {"response": {"docs": [], "numFound": 0}})
+
+
+def test_stalled_request_trips_watchdog_as_temporary_failure():
+    import time
+
+    session = _HangingSession(hang_seconds=0.5)
+    provider = InternetArchiveProvider(session=session, request_watchdog_seconds=0.15)
+
+    started = time.monotonic()
+    with pytest.raises(requests.RequestException):
+        provider.search_page("yoruba movie", page=1)
+    elapsed = time.monotonic() - started
+
+    # The caller must be released promptly by the watchdog, not after the
+    # full 2s the underlying (fake) request would otherwise have taken.
+    assert elapsed < 1.0
+
+
+def test_watchdog_trip_is_a_temporary_failure_supply_scan_can_retry(isolated_db, monkeypatch):
+    """A watchdog trip must flow through the existing ArchiveTemporaryFailure
+    retry/backoff path, not abort the scan outright."""
+    from movie_manager.supply_scan import ArchiveTemporaryFailure, SupplyScanController
+
+    db.init_db()
+    controller = SupplyScanController()
+    controller.language = "yoruba"
+
+    session = _HangingSession(hang_seconds=0.5)
+    provider = InternetArchiveProvider(session=session, request_watchdog_seconds=0.1)
+    # Shorten the backoff table (rather than monkeypatching the global
+    # time.sleep, which would also silence the fake session's own
+    # hang_seconds sleep and make the "stall" instant).
+    monkeypatch.setattr("movie_manager.supply_scan.ARCHIVE_NETWORK_RETRY_SECONDS", [0])
+
+    with pytest.raises(ArchiveTemporaryFailure):
+        controller._archive_request(provider.search_page, "yoruba movie", 1, max_attempts=2)
+
+    # Each attempt actually reached the (hanging) network call, then was
+    # bounded by the watchdog rather than left to hang.
+    assert session.calls == 2

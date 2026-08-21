@@ -80,6 +80,7 @@ T.els.modeSelect = makeEl(); T.els.modeSelect.value = "discover";
 T.els.primaryActionBtn = makeEl();
 T.els.secondaryStopBtn = makeEl();
 T.els.languageSelect = makeEl();
+T.els.providerSelect = makeEl();
 T.els.downloadPrimaryBtn = makeEl();
 T.els.downloadStopBtn = makeEl();
 T.els.movieStatusFilter = makeEl();

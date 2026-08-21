@@ -1,4 +1,5 @@
 import re
+import shutil
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -59,6 +60,19 @@ def is_http_url(url: str) -> bool:
 
 
 YOUTUBE_HOST_FRAGMENTS = ("youtube.com", "youtu.be")
+
+
+def free_disk_space_gb(path) -> float:
+    """Free space in GiB on the drive containing `path`. `path` need not
+    exist yet -- checks the nearest existing ancestor directory."""
+    p = Path(str(path)).expanduser()
+    while not p.exists():
+        parent = p.parent
+        if parent == p:
+            break
+        p = parent
+    usage = shutil.disk_usage(str(p))
+    return usage.free / (1024 ** 3)
 
 
 def is_direct_http_candidate(url: str) -> bool:

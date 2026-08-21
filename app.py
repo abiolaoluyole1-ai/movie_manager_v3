@@ -8,9 +8,11 @@ from waitress import serve
 
 load_dotenv()
 
+from movie_manager.db import reset_interrupted_downloads  # noqa: E402
 from movie_manager.webapp import create_app  # noqa: E402
 
 app = create_app()
+reset_interrupted_downloads()
 
 
 def open_browser():

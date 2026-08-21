@@ -5,53 +5,87 @@ from pathlib import Path
 
 import requests
 
-from .config import NETWORK_RETRY_SECONDS
+from .config import (
+    CONCURRENCY_DEFAULT, CONCURRENCY_MAX, CONCURRENCY_MIN,
+    MIN_FREE_DISK_GB_DEFAULT, NETWORK_RETRY_SECONDS, clamp_min_free_disk_gb,
+)
 from .db import get_setting, next_download_ready, update_download
 from .events import events
-from .utils import extension_from_url, safe_filename, is_http_url
+from .utils import extension_from_url, free_disk_space_gb, safe_filename, is_http_url
+
+IDLE_POLL_SECONDS = 2
+DISK_CHECK_WAIT_SECONDS = 10
 
 
 class DownloadController:
-    """Downloader for authorised/direct HTTP(S) movie-file sources."""
+    """Downloader for authorised/direct HTTP(S) movie-file sources.
+
+    Runs `concurrency` worker threads (1-7, default 3). Each worker
+    independently claims one movie at a time via next_download_ready()'s
+    atomic claim (so a movie is never picked up by two workers), downloads
+    it start-to-finish, finalises/verifies/persists it, then immediately
+    goes back for the next one -- so a freed slot is refilled without
+    waiting for the rest of the batch, and each completed movie is usable
+    the moment it finishes.
+    """
 
     def __init__(self):
-        self._thread = None
+        self._workers = []
         self._pause = threading.Event()
         self._stop = threading.Event()
         self._lock = threading.RLock()
         self.status = "IDLE"
         self.language = "yoruba"
-        self.current_movie_id = None
+        self.concurrency = CONCURRENCY_DEFAULT
         self.message = ""
         self.network_wait = False
+        self.disk_low = False
+        self.active = {}
 
     def snapshot(self):
         with self._lock:
+            jobs = sorted(self.active.values(), key=lambda j: j.get("movie_id", 0))
             return {
                 "status": self.status,
                 "language": self.language,
-                "current_movie_id": self.current_movie_id,
+                "concurrency": self.concurrency,
+                "current_movie_id": jobs[0]["movie_id"] if jobs else None,
+                "active_jobs": [dict(j) for j in jobs],
+                "active_count": len(jobs),
                 "message": self.message,
                 "network_wait": self.network_wait,
+                "disk_low": self.disk_low,
             }
 
-    def start(self, language="yoruba"):
+    def start(self, language="yoruba", concurrency=None):
         with self._lock:
-            if self._thread and self._thread.is_alive():
+            if concurrency is None:
+                concurrency = self.concurrency or CONCURRENCY_DEFAULT
+            concurrency = max(CONCURRENCY_MIN, min(CONCURRENCY_MAX, int(concurrency)))
+
+            if any(w.is_alive() for w in self._workers):
                 if self.status == "PAUSED":
                     self._pause.clear()
                     self.status = "RUNNING"
                     events.emit("download_status", self.snapshot())
                 return
+
             self.language = language
+            self.concurrency = concurrency
             self._stop.clear()
             self._pause.clear()
             self.status = "RUNNING"
-            self.message = "Download worker started."
+            self.message = f"Download workers started ({concurrency})."
             self.network_wait = False
-            self._thread = threading.Thread(target=self._run, daemon=True)
-            self._thread.start()
-            events.emit("download_status", self.snapshot())
+            self.disk_low = False
+            self.active = {}
+            self._workers = [
+                threading.Thread(target=self._run, args=(worker_id,), daemon=True)
+                for worker_id in range(concurrency)
+            ]
+        for worker in self._workers:
+            worker.start()
+        events.emit("download_status", self.snapshot())
 
     def pause(self):
         self._pause.set()
@@ -72,7 +106,7 @@ class DownloadController:
         self._pause.clear()
         with self._lock:
             self.status = "STOPPING"
-            self.message = "Stopping download worker..."
+            self.message = "Stopping download workers..."
             self.network_wait = False
         events.emit("download_status", self.snapshot())
 
@@ -92,7 +126,38 @@ class DownloadController:
         part = Path(str(final) + ".part")
         return final, part
 
-    def _download_one(self, movie):
+    def _disk_guard_ok(self):
+        """True if the destination drive has enough free space for another
+        job to start. A failure to even check (missing setting/path issue)
+        never blocks downloads on its own -- only a confirmed low-space
+        reading does."""
+        try:
+            min_gb = clamp_min_free_disk_gb(get_setting("min_free_disk_gb", str(MIN_FREE_DISK_GB_DEFAULT)))
+            root = get_setting("download_root")
+            if not root:
+                return True
+            return free_disk_space_gb(root) >= min_gb
+        except Exception:
+            return True
+
+    def _enter_disk_low(self):
+        with self._lock:
+            if not self.disk_low:
+                self.disk_low = True
+                self.status = "DISK_LOW"
+                self.message = "Downloads paused: low disk space. Free up space to continue."
+                events.emit("download_status", self.snapshot())
+
+    def _leave_disk_low(self):
+        with self._lock:
+            if self.disk_low:
+                self.disk_low = False
+                if not self._pause.is_set() and not self._stop.is_set():
+                    self.status = "RUNNING"
+                    self.message = "Disk space recovered. Resuming downloads."
+                events.emit("download_status", self.snapshot())
+
+    def _download_one(self, movie, worker_id):
         url = movie.get("download_url") or ""
         if not is_http_url(url):
             update_download(movie["id"], download_status="FAILED", download_error="Invalid direct download URL.")
@@ -100,127 +165,170 @@ class DownloadController:
 
         final, part = self._output_paths(movie)
         attempt = int(movie.get("retry_count") or 0)
+        completed = False
 
-        while not self._stop.is_set():
-            self._wait_if_paused()
-            existing = part.stat().st_size if part.exists() else 0
-            headers = {"User-Agent": "MovieManagerV3/1.0"}
-            if existing > 0:
-                headers["Range"] = f"bytes={existing}-"
-
-            try:
-                with requests.get(url, headers=headers, stream=True, timeout=(20, 60), allow_redirects=True) as r:
-                    if r.status_code not in {200, 206}:
-                        if r.status_code in {408, 429, 500, 502, 503, 504}:
-                            raise requests.RequestException(f"Temporary source error {r.status_code}")
-                        raise RuntimeError(f"Download source returned HTTP {r.status_code}")
-
-                    with self._lock:
-                        recovered = self.network_wait
-                        self.network_wait = False
-                    if recovered:
-                        events.emit("download_status", self.snapshot())
-
-                    if existing > 0 and r.status_code == 200:
-                        existing = 0
-                        try:
-                            part.unlink()
-                        except FileNotFoundError:
-                            pass
-
-                    content_length = int(r.headers.get("Content-Length") or 0)
-                    total = existing + content_length if content_length else None
-                    update_download(
-                        movie["id"], download_status="DOWNLOADING", status="DOWNLOADING",
-                        file_path=str(part), bytes_downloaded=existing, total_bytes=total,
-                        download_error=None, retry_count=attempt,
-                    )
-
-                    mode = "ab" if existing else "wb"
-                    downloaded = existing
-                    started = time.monotonic()
-                    last_emit = 0.0
-
-                    with open(part, mode) as f:
-                        for chunk in r.iter_content(chunk_size=1024 * 512):
-                            if self._stop.is_set():
-                                return
-                            self._wait_if_paused()
-                            if not chunk:
-                                continue
-                            f.write(chunk)
-                            downloaded += len(chunk)
-
-                            now = time.monotonic()
-                            elapsed = max(now - started, 0.001)
-                            speed = max(downloaded - existing, 0) / elapsed
-                            eta = ((total - downloaded) / speed) if total and speed > 0 else None
-
-                            if now - last_emit >= 0.7:
-                                update_download(
-                                    movie["id"], download_status="DOWNLOADING",
-                                    bytes_downloaded=downloaded, total_bytes=total,
-                                    download_speed_bps=speed, download_eta_seconds=eta,
-                                )
-                                events.emit("download_progress", {
-                                    "movie_id": movie["id"], "bytes_downloaded": downloaded,
-                                    "total_bytes": total, "speed_bps": speed, "eta_seconds": eta,
-                                })
-                                last_emit = now
-
-                    actual = part.stat().st_size
-                    if total and actual < total:
-                        raise requests.RequestException(f"Connection ended early ({actual}/{total} bytes).")
-
-                    os.replace(part, final)
-                    update_download(
-                        movie["id"], download_status="DOWNLOADED", status="DOWNLOADED",
-                        file_path=str(final), bytes_downloaded=actual, total_bytes=actual,
-                        download_speed_bps=0, download_eta_seconds=0, download_error=None,
-                    )
-                    events.emit("download_complete", {"movie_id": movie["id"], "file_path": str(final)})
-                    return
-
-            except (requests.RequestException, OSError) as exc:
-                delay = NETWORK_RETRY_SECONDS[min(attempt, len(NETWORK_RETRY_SECONDS)-1)]
-                attempt += 1
-                update_download(
-                    movie["id"], download_status="WAITING_NETWORK",
-                    download_error=str(exc), retry_count=attempt,
-                )
-                with self._lock:
-                    self.message = f"Network/source interrupted. Retrying automatically in {delay}s."
-                    self.network_wait = True
-                events.emit("network_wait", {
-                    "scope": "download", "movie_id": movie["id"],
-                    "delay": delay, "error": str(exc),
-                })
-                events.emit("download_status", self.snapshot())
-                for _ in range(delay * 4):
-                    if self._stop.is_set():
-                        return
-                    self._wait_if_paused()
-                    time.sleep(0.25)
-            except Exception as exc:
-                update_download(
-                    movie["id"], download_status="FAILED", status="ACCEPTED",
-                    download_error=str(exc), retry_count=attempt,
-                )
-                events.emit("error", {"scope": "download", "movie_id": movie["id"], "message": str(exc)})
-                return
-
-    def _run(self):
         try:
             while not self._stop.is_set():
                 self._wait_if_paused()
+                existing = part.stat().st_size if part.exists() else 0
+                headers = {"User-Agent": "MovieManagerV3/1.0"}
+                if existing > 0:
+                    headers["Range"] = f"bytes={existing}-"
+
+                try:
+                    with requests.get(url, headers=headers, stream=True, timeout=(20, 60), allow_redirects=True) as r:
+                        if r.status_code not in {200, 206}:
+                            if r.status_code in {408, 429, 500, 502, 503, 504}:
+                                raise requests.RequestException(f"Temporary source error {r.status_code}")
+                            raise RuntimeError(f"Download source returned HTTP {r.status_code}")
+
+                        with self._lock:
+                            recovered = self.network_wait
+                            self.network_wait = False
+                        if recovered:
+                            events.emit("download_status", self.snapshot())
+
+                        if existing > 0 and r.status_code == 200:
+                            existing = 0
+                            try:
+                                part.unlink()
+                            except FileNotFoundError:
+                                pass
+
+                        content_length = int(r.headers.get("Content-Length") or 0)
+                        total = existing + content_length if content_length else None
+                        update_download(
+                            movie["id"], download_status="DOWNLOADING", status="DOWNLOADING",
+                            file_path=str(part), bytes_downloaded=existing, total_bytes=total,
+                            download_error=None, retry_count=attempt,
+                        )
+                        self._update_job(movie, worker_id, stage="DOWNLOADING",
+                                          bytes_downloaded=existing, total_bytes=total, retries=attempt)
+
+                        mode = "ab" if existing else "wb"
+                        downloaded = existing
+                        started = time.monotonic()
+                        last_emit = 0.0
+
+                        with open(part, mode) as f:
+                            for chunk in r.iter_content(chunk_size=1024 * 512):
+                                if self._stop.is_set():
+                                    return
+                                self._wait_if_paused()
+                                if not chunk:
+                                    continue
+                                f.write(chunk)
+                                downloaded += len(chunk)
+
+                                now = time.monotonic()
+                                elapsed = max(now - started, 0.001)
+                                speed = max(downloaded - existing, 0) / elapsed
+                                eta = ((total - downloaded) / speed) if total and speed > 0 else None
+
+                                if now - last_emit >= 0.7:
+                                    update_download(
+                                        movie["id"], download_status="DOWNLOADING",
+                                        bytes_downloaded=downloaded, total_bytes=total,
+                                        download_speed_bps=speed, download_eta_seconds=eta,
+                                    )
+                                    self._update_job(movie, worker_id, stage="DOWNLOADING",
+                                                      bytes_downloaded=downloaded, total_bytes=total,
+                                                      speed_bps=speed, eta_seconds=eta, retries=attempt)
+                                    events.emit("download_progress", {
+                                        "movie_id": movie["id"], "bytes_downloaded": downloaded,
+                                        "total_bytes": total, "speed_bps": speed, "eta_seconds": eta,
+                                    })
+                                    last_emit = now
+
+                        self._update_job(movie, worker_id, stage="VERIFYING")
+                        actual = part.stat().st_size
+                        if total and actual < total:
+                            raise requests.RequestException(f"Connection ended early ({actual}/{total} bytes).")
+
+                        self._update_job(movie, worker_id, stage="FINALISING")
+                        os.replace(part, final)
+                        update_download(
+                            movie["id"], download_status="DOWNLOADED", status="DOWNLOADED",
+                            file_path=str(final), bytes_downloaded=actual, total_bytes=actual,
+                            download_speed_bps=0, download_eta_seconds=0, download_error=None,
+                        )
+                        events.emit("download_complete", {"movie_id": movie["id"], "file_path": str(final)})
+                        completed = True
+                        return
+
+                except (requests.RequestException, OSError) as exc:
+                    delay = NETWORK_RETRY_SECONDS[min(attempt, len(NETWORK_RETRY_SECONDS)-1)]
+                    attempt += 1
+                    update_download(
+                        movie["id"], download_status="WAITING_NETWORK",
+                        download_error=str(exc), retry_count=attempt,
+                    )
+                    self._update_job(movie, worker_id, stage="RETRY_WAIT", retries=attempt)
+                    with self._lock:
+                        self.message = f"Network/source interrupted. Retrying automatically in {delay}s."
+                        self.network_wait = True
+                    events.emit("network_wait", {
+                        "scope": "download", "movie_id": movie["id"],
+                        "delay": delay, "error": str(exc),
+                    })
+                    events.emit("download_status", self.snapshot())
+                    for _ in range(delay * 4):
+                        if self._stop.is_set():
+                            return
+                        self._wait_if_paused()
+                        time.sleep(0.25)
+                except Exception as exc:
+                    update_download(
+                        movie["id"], download_status="FAILED", status="ACCEPTED",
+                        download_error=str(exc), retry_count=attempt,
+                    )
+                    events.emit("error", {"scope": "download", "movie_id": movie["id"], "message": str(exc)})
+                    return
+        finally:
+            if not completed and self._stop.is_set():
+                # Movie was claimed (or mid-transfer) when Stop was
+                # requested -- release it back to READY so it resumes
+                # from its .part file on the next Start, instead of being
+                # stuck at DOWNLOADING (unclaimable) until a restart.
+                update_download(movie["id"], download_status="READY")
+
+    def _update_job(self, movie, worker_id, **fields):
+        with self._lock:
+            job = self.active.get(movie["id"])
+            if job is None:
+                return
+            job.update(fields)
+
+    def _run(self, worker_id=0):
+        try:
+            while not self._stop.is_set():
+                self._wait_if_paused()
+
+                if not self._disk_guard_ok():
+                    self._enter_disk_low()
+                    for _ in range(DISK_CHECK_WAIT_SECONDS * 4):
+                        if self._stop.is_set():
+                            break
+                        self._wait_if_paused()
+                        time.sleep(0.25)
+                    continue
+                self._leave_disk_low()
+
+                # Re-check right before claiming so a pause/stop requested
+                # while this worker was between its last check and here
+                # can't slip a claim through.
+                self._wait_if_paused()
+                if self._stop.is_set():
+                    break
+
                 movie = next_download_ready(self.language)
                 if not movie:
                     with self._lock:
-                        self.status = "WAITING"
-                        self.current_movie_id = None
-                        self.message = "Waiting for an authorised local-file download source..."
+                        if not self.active and not self._pause.is_set() and not self._stop.is_set():
+                            self.status = "WAITING"
+                            self.message = "Waiting for an authorised local-file download source..."
                     events.emit("download_status", self.snapshot())
-                    for _ in range(8):
+                    for _ in range(IDLE_POLL_SECONDS * 4):
                         if self._stop.is_set():
                             break
                         self._wait_if_paused()
@@ -228,21 +336,35 @@ class DownloadController:
                     continue
 
                 with self._lock:
-                    self.status = "RUNNING"
-                    self.current_movie_id = movie["id"]
+                    if not self._pause.is_set() and not self._stop.is_set():
+                        self.status = "RUNNING"
                     self.message = f"Downloading: {movie['title']}"
-                update_download(movie["id"], download_status="QUEUED", status="QUEUED")
+                    self.active[movie["id"]] = {
+                        "movie_id": movie["id"], "worker_id": worker_id, "title": movie["title"],
+                        "stage": "QUEUED", "bytes_downloaded": 0, "total_bytes": None,
+                        "speed_bps": 0, "eta_seconds": None, "retries": int(movie.get("retry_count") or 0),
+                    }
                 events.emit("download_status", self.snapshot())
-                self._download_one(movie)
+                try:
+                    self._download_one(movie, worker_id)
+                finally:
+                    with self._lock:
+                        self.active.pop(movie["id"], None)
         except Exception as exc:
             with self._lock:
                 self.status = "ERROR"
                 self.message = str(exc)
+            self._stop.set()
             events.emit("error", {"scope": "download", "message": str(exc)})
         finally:
             with self._lock:
+                still_running = any(
+                    w is not threading.current_thread() and w.is_alive() for w in self._workers
+                )
                 self.network_wait = False
-                if self._stop.is_set() and self.status != "ERROR":
-                    self.status = "STOPPED"
-                    self.message = "Download worker stopped safely."
+                if not still_running:
+                    self.disk_low = False
+                    if self._stop.is_set() and self.status != "ERROR":
+                        self.status = "STOPPED"
+                        self.message = "Download workers stopped safely."
             events.emit("download_status", self.snapshot())

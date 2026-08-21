@@ -559,6 +559,14 @@ def source_status_counts(language, accepted_statuses):
 
 
 def next_download_ready(language=None):
+    """Atomically selects and claims the next ready download job.
+
+    The select and the claiming write (flipping download_status to
+    DOWNLOADING, which is not one of the selectable states) happen inside a
+    single BEGIN IMMEDIATE transaction, so concurrent worker threads racing
+    to call this at the same moment can never claim the same movie twice.
+    Returns the claimed movie dict, or None if nothing is ready.
+    """
     params = []
     sql = """
     SELECT * FROM movies
@@ -570,9 +578,44 @@ def next_download_ready(language=None):
         sql += " AND language=?"
         params.append(language)
     sql += " ORDER BY CASE download_status WHEN 'QUEUED' THEN 0 WHEN 'READY' THEN 1 ELSE 2 END, id ASC LIMIT 1"
-    with connect() as conn:
-        row = conn.execute(sql, params).fetchone()
-        return dict(row) if row else None
+    with _lock, connect() as conn:
+        conn.isolation_level = None
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = conn.execute(sql, params).fetchone()
+            if not row:
+                conn.commit()
+                return None
+            movie = dict(row)
+            conn.execute(
+                "UPDATE movies SET download_status='DOWNLOADING', status='DOWNLOADING', updated_at=? WHERE id=?",
+                (now_iso(), movie["id"])
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+    movie["download_status"] = "DOWNLOADING"
+    movie["status"] = "DOWNLOADING"
+    return movie
+
+
+def reset_interrupted_downloads():
+    """Normalises movies left mid-transfer by an unclean shutdown.
+
+    A movie whose download_status is still DOWNLOADING at startup was never
+    actually finished -- the process that was writing its .part file is
+    gone. Reset it to READY (not FAILED) so a worker resumes it from the
+    existing .part file instead of it being silently stuck, dropped, or
+    mistaken for complete.
+    """
+    with _lock, connect() as conn:
+        conn.execute("""
+        UPDATE movies SET download_status='READY',
+        status=CASE WHEN status='DOWNLOADING' THEN 'ACCEPTED' ELSE status END,
+        updated_at=?
+        WHERE download_status='DOWNLOADING'
+        """, (now_iso(),))
 
 
 def create_job(kind, language, target=None, status="RUNNING", stats=None, message=None):
@@ -727,9 +770,14 @@ def bulk_restore_movies(language, movie_ids):
 
 
 def retry_download(movie_id):
+    """Requeues a movie for download. Guarded to only affect a movie that
+    isn't already downloading/queued/downloaded, so a stray retry call can
+    never pull an in-flight or finished job back into the READY queue and
+    cause a duplicate/duplicate-in-progress download."""
     with _lock, connect() as conn:
         conn.execute("""
         UPDATE movies SET download_status='READY', download_error=NULL, retry_count=0,
         status=CASE WHEN status='REJECTED' THEN status ELSE 'ACCEPTED' END, updated_at=?
         WHERE id=? AND download_url IS NOT NULL AND download_url<>''
+          AND download_status NOT IN ('DOWNLOADING','QUEUED','DOWNLOADED')
         """, (now_iso(), movie_id))

@@ -1,6 +1,4 @@
 import json
-from pathlib import Path
-from uuid import uuid4
 
 import pytest
 
@@ -9,18 +7,6 @@ from movie_manager.discovery import ACCEPTED_STATUSES, DiscoveryController
 from movie_manager.runtime import Runtime
 from movie_manager.source_adapters import DirectHttpAdapter, LocalMappingAdapter, SourceResolver
 from movie_manager.webapp import create_app
-
-
-@pytest.fixture
-def isolated_db(monkeypatch):
-    path = Path.cwd() / f".movie-manager-test-{uuid4().hex}.db"
-    monkeypatch.setattr(db, "DB_PATH", path)
-    yield path
-    for candidate in (path, Path(f"{path}-wal"), Path(f"{path}-shm")):
-        try:
-            candidate.unlink(missing_ok=True)
-        except PermissionError:
-            pass
 
 
 @pytest.fixture
@@ -295,10 +281,13 @@ def test_import_rejects_invalid_urls(isolated_mapping):
 # 11-12: discovery integration
 # ---------------------------------------------------------------------------
 
-def test_accepted_movie_with_ready_source_is_queued_for_download(monkeypatch, isolated_db, isolated_mapping):
+def test_accepted_youtube_movie_is_immediately_ready_for_download(monkeypatch, isolated_db):
+    """_accept_and_resolve is the single accept+resolve chokepoint every
+    provider's search cycle goes through, and for the YouTube-only active
+    product it always marks a freshly accepted movie SOURCE_READY/READY via
+    YTDLP immediately -- no CSV/JSON source mapping is needed or consulted
+    at accept time (that manual-override path is a separate, later step)."""
     db.init_db()
-    source_mappings.save_mappings({"item0": {"download_url": "https://example.test/movie.mp4"}})
-    _mock_head_ok(monkeypatch)
     controller = DiscoveryController()
     _wire_fake_network(monkeypatch, controller, ["item0"])
     controller.language = "yoruba"
@@ -313,28 +302,20 @@ def test_accepted_movie_with_ready_source_is_queued_for_download(monkeypatch, is
     assert movie["status"] == "ACCEPTED"
     assert movie["source_status"] == "SOURCE_READY"
     assert movie["download_status"] == "READY"
-    assert movie["download_url"] == "https://example.test/movie.mp4"
+    assert movie["provider"] == "youtube"
+    assert movie["download_backend"] == "YTDLP"
 
     ready = db.next_download_ready("yoruba")
     assert ready is not None
     assert ready["id"] == movie["id"]
 
 
-def test_source_missing_does_not_block_discovery(monkeypatch, isolated_db, isolated_mapping):
-    db.init_db()
-    controller = DiscoveryController()
-    _wire_fake_network(monkeypatch, controller, [f"item{i}" for i in range(3)])
-    controller.language = "yoruba"
-    controller.target = 3
-    controller.job_id = None
-
-    controller._run()
-
-    assert controller.status == "COMPLETED"
-    assert db.count_movies("yoruba", ACCEPTED_STATUSES) == 3
-    rows = db.list_movies("yoruba", status="ACCEPTED", limit=10)
-    assert all(r["source_status"] == "SOURCE_MISSING" for r in rows)
-    assert all(r["download_status"] == "NOT_READY" for r in rows)
+# Retired: test_source_missing_does_not_block_discovery asserted that a
+# freshly discovered YouTube movie without a CSV/JSON source mapping lands
+# as SOURCE_MISSING/NOT_READY. That's no longer possible for the active
+# YouTube-only product -- see test_accepted_youtube_movie_is_immediately_
+# ready_for_download above, which now covers the real (always-SOURCE_READY)
+# behavior for the same discovery path.
 
 
 # ---------------------------------------------------------------------------

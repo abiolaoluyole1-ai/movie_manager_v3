@@ -1,6 +1,3 @@
-from pathlib import Path
-from uuid import uuid4
-
 import pytest
 import requests
 
@@ -12,18 +9,6 @@ from movie_manager.internet_archive import (
     METADATA_URL, SEARCH_URL, InternetArchiveError, InternetArchiveProvider,
 )
 from movie_manager.source_adapters import DirectHttpAdapter
-
-
-@pytest.fixture
-def isolated_db(monkeypatch):
-    path = Path.cwd() / f".movie-manager-test-{uuid4().hex}.db"
-    monkeypatch.setattr(db, "DB_PATH", path)
-    yield path
-    for candidate in (path, Path(f"{path}-wal"), Path(f"{path}-shm")):
-        try:
-            candidate.unlink(missing_ok=True)
-        except PermissionError:
-            pass
 
 
 class FakeResponse:
@@ -228,26 +213,15 @@ def test_clear_supported_licence_accepted():
     assert "creativecommons.org" in label
 
 
-def test_ambiguous_rights_do_not_auto_queue(monkeypatch, isolated_db):
-    db.init_db()
-    controller = DiscoveryController()
-    controller.language = "yoruba"
-    controller.target = 1
-    controller.job_id = None
-    controller.downloadable_only = False
-
-    _wire_provider(monkeypatch, _search_payload([_doc("ambig1")]), {
-        "ambig1": _metadata(licenseurl="")  # no clear rights signal
-    })
-
-    controller._run_archive()
-
-    rows = db.list_movies("yoruba", status="ALL", limit=10)
-    assert len(rows) == 1
-    movie = rows[0]
-    assert movie["status"] == "ACCEPTED"  # still a valid catalogue entry
-    assert movie["source_status"] == "SOURCE_INVALID"  # but never auto-queued
-    assert movie["download_status"] != "READY"
+# Retired: test_ambiguous_rights_do_not_auto_queue asserted that an
+# ambiguous-rights Archive item is accepted but marked SOURCE_INVALID
+# instead of auto-queued. _accept_and_resolve (the single accept+resolve
+# chokepoint every provider's search cycle now goes through) unconditionally
+# marks every accepted movie SOURCE_READY via YTDLP -- the product is
+# YouTube-only now (webapp.py's discovery_start hardcodes provider="youtube"
+# regardless of what's requested), and Archive's ambiguous-rights ->
+# SOURCE_INVALID path is unreachable from the active app. evaluate_rights()
+# itself is still covered by test_clear_supported_licence_accepted above.
 
 
 # ---------------------------------------------------------------------------

@@ -61,6 +61,8 @@ label{cursor:pointer}
 
 /* ---------- Dashboard: primary workflow ---------- */
 .hero{border-radius:var(--radius);padding:26px;display:flex;gap:24px;align-items:center;justify-content:space-between;flex-wrap:wrap}
+.hero.compact{padding:22px}
+.dash-top-row,.dash-second-row{align-items:stretch}
 .controls{display:flex;align-items:end;gap:9px;flex-wrap:wrap;justify-content:flex-end}
 .field{display:flex;flex-direction:column;gap:6px}
 .field label{font-size:11px;color:var(--muted);font-weight:700}
@@ -74,7 +76,7 @@ label{cursor:pointer}
 .btn:disabled{opacity:.55;cursor:not-allowed;transform:none}
 
 /* One clear "what's happening" statement, not several counters */
-.progress-hero{border-radius:var(--radius);padding:24px 26px;margin:14px 0}
+.progress-hero{border-radius:var(--radius);padding:24px 26px}
 .progress-hero-title{font-size:18px;font-weight:800;margin:0 0 4px}
 .progress-hero-sub{color:var(--muted);font-size:13px;margin:0 0 14px}
 .progress-hero-row{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin-bottom:10px;flex-wrap:wrap}
@@ -102,6 +104,8 @@ label{cursor:pointer}
 .detail-grid>div{background:rgba(255,255,255,.58);border:1px solid var(--line);border-radius:14px;padding:12px}
 .detail-grid span{display:block;color:var(--muted);font-size:11px;margin-bottom:5px}
 .detail-grid b{font-size:17px}
+.detail-grid-4{grid-template-columns:repeat(4,1fr)}
+.active-jobs-grid.compact{max-height:260px;overflow-y:auto}
 .current-task{margin-top:14px;padding:14px;border-radius:14px;background:rgba(255,0,51,.045);border:1px solid rgba(255,0,51,.1)}
 .current-task span,.current-task small{display:block}
 .current-task span{font-size:10px;color:var(--red);font-weight:800;letter-spacing:.12em}
@@ -160,6 +164,13 @@ label{cursor:pointer}
 .movie-actions{display:flex;gap:7px;flex-wrap:wrap;margin-top:11px}
 .mini-btn{border:1px solid var(--line);background:rgba(255,255,255,.8);border-radius:10px;padding:8px 10px;font-size:11px;font-weight:750;min-height:36px}
 .mini-btn.red{color:var(--red);border-color:rgba(255,0,51,.18)}
+.mini-btn.accent{color:#fff;background:var(--red);border-color:var(--red)}
+.card-menu{position:relative}
+.card-menu-list{position:absolute;right:0;bottom:calc(100% + 6px);z-index:5;min-width:180px;display:flex;flex-direction:column;gap:2px;padding:6px;border-radius:12px;background:#fff;border:1px solid var(--line);box-shadow:0 12px 28px rgba(20,20,20,.16)}
+.card-menu-list.hidden{display:none}
+.menu-item{border:0;background:transparent;text-align:left;padding:9px 10px;border-radius:8px;font-size:12px;font-weight:650;color:#3a3d43;min-height:36px}
+.menu-item:hover{background:rgba(20,20,20,.06)}
+.menu-item.danger{color:var(--red)}
 .toolbar{display:flex;gap:8px;flex-wrap:wrap}
 .toolbar input{min-width:240px}
 .notice{border-radius:15px;background:rgba(255,0,51,.055);border:1px solid rgba(255,0,51,.12);padding:14px;margin-bottom:18px;font-size:13px;line-height:1.55}
@@ -175,11 +186,6 @@ label{cursor:pointer}
 .bulk-action-group{display:flex;flex-wrap:wrap;gap:8px}
 .bulk-action-group.hidden{display:none}
 .hidden{display:none}
-.source-badge{display:inline-block;font-size:10px;font-weight:800;letter-spacing:.04em;padding:3px 7px;border-radius:7px;margin-left:6px;vertical-align:middle}
-.source-badge.ready{background:var(--ok-soft);color:var(--ok)}
-.source-badge.missing{background:rgba(20,20,20,.07);color:var(--muted)}
-.source-badge.invalid{background:rgba(255,0,51,.1);color:var(--red)}
-.source-badge.pending{background:var(--warn-soft);color:var(--warn)}
 
 /* ---------- Downloads page: grouped, not one giant table ---------- */
 .download-groups{display:flex;flex-direction:column;gap:22px}
@@ -212,6 +218,10 @@ label{cursor:pointer}
 
 /* ---------- Settings ---------- */
 .settings-panel{max-width:950px}
+.settings-save-bar{display:flex;align-items:center;justify-content:flex-end;gap:14px;padding:14px 0;border-bottom:1px solid var(--line);margin-bottom:6px}
+.settings-save-status{font-size:12px;font-weight:750;color:var(--muted)}
+.settings-save-status.ok{color:var(--ok)}
+.settings-save-status.error{color:var(--red)}
 .settings-section{margin-bottom:10px}
 .settings-section-head{padding:6px 0 14px}
 .settings-section-head h4{margin:0 0 3px;font-size:14px;font-weight:800;letter-spacing:.01em}
@@ -324,6 +334,8 @@ code{background:rgba(0,0,0,.06);padding:2px 5px;border-radius:5px;word-break:bre
   .download-row-stat{text-align:left;margin-left:56px}
   .setting-row{flex-direction:column;align-items:flex-start;gap:10px}
   .setting-row .switch{align-self:flex-start}
+  .settings-save-bar{flex-wrap:wrap;justify-content:space-between}
+  .settings-save-bar #saveSettings{width:100%}
 }
 
 @media(max-width:430px){

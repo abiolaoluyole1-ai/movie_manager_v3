@@ -6,9 +6,6 @@
 - YouTube's "not a bot" access-block is classified/cleaned, not dumped raw
 - a blocked movie is not retried in a rapid loop
 """
-from pathlib import Path
-from uuid import uuid4
-
 import pytest
 
 from movie_manager import db
@@ -18,18 +15,6 @@ from movie_manager.config import (
 from movie_manager.download import DownloadController, YtDlpDownloadBackend
 from movie_manager.runtime import Runtime
 from movie_manager.webapp import create_app
-
-
-@pytest.fixture
-def isolated_db(monkeypatch):
-    path = Path.cwd() / f".movie-manager-test-{uuid4().hex}.db"
-    monkeypatch.setattr(db, "DB_PATH", path)
-    yield path
-    for candidate in (path, Path(f"{path}-wal"), Path(f"{path}-shm")):
-        try:
-            candidate.unlink(missing_ok=True)
-        except PermissionError:
-            pass
 
 
 @pytest.fixture

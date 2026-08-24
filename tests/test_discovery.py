@@ -1,6 +1,4 @@
 import logging
-from pathlib import Path
-from uuid import uuid4
 
 import pytest
 
@@ -17,19 +15,6 @@ class FakeResponse:
 
     def json(self):
         return self._payload
-
-
-@pytest.fixture
-def isolated_db(monkeypatch):
-    path = Path.cwd() / f".movie-manager-test-{uuid4().hex}.db"
-    monkeypatch.setattr(db, "DB_PATH", path)
-    yield path
-    for candidate in (path, Path(f"{path}-wal"), Path(f"{path}-shm")):
-        try:
-            candidate.unlink(missing_ok=True)
-        except PermissionError:
-            # SQLite may retain a Windows handle until the test process exits.
-            pass
 
 
 def test_permanent_api_error_is_not_retried_and_key_is_redacted(monkeypatch, caplog):

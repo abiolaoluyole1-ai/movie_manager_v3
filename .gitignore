@@ -6,3 +6,4 @@ __pycache__/
 pytest-cache-files-*/
 *.pyc
 .movie-manager-test-*.db*
+.tmp/

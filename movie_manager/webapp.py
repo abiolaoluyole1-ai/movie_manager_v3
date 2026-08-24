@@ -481,8 +481,6 @@ def create_app():
             path = filedialog.askdirectory(initialdir=initial, title="Choose Movie Manager download folder")
             root.destroy()
             if path:
-                Path(path).mkdir(parents=True, exist_ok=True)
-                set_setting("download_root", path)
                 return jsonify({"ok": True, "path": path})
             return jsonify({"ok": True, "path": initial, "cancelled": True})
         except Exception as exc:

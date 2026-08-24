@@ -1,6 +1,6 @@
 const state={language:"yoruba",target:30,provider:"youtube",movies:[],runtime:null,counts:{},mode:"discover",selection:new Set(),downloadableOnly:false};
 const $=id=>document.getElementById(id);const els={};
-function cache(){["languageSelect","targetInput","modeSelect","primaryActionBtn","secondaryStopBtn","statTarget","statAccepted","statDownloadable","statDownloaded","statRemaining","statSourceMissing","statSourceInvalid","statFound","statRejected","discoveryStatus","downloadStatus","discoveryBar","discoveryProgressText","discoveryPercent","scannedCount","underCount","notMovieCount","wrongLanguageCount","duplicateCount","apiCount","retryCount","currentQuery","discoveryMessage","recentMovies","allMovies","activityLog","downloadSummary","movieSearch","movieStatusFilter","refreshMovies","downloadPrimaryBtn","downloadStopBtn","minimumDuration","maxConcurrentDownloads","minFreeDiskGb","downloadRoot","chooseFolder","saveSettings","settingsSaveStatus","apiConfigured","movieModal","modalBody","toastWrap","networkDot","networkText","clearActivity","moviesTitle","selectPageBtn","selectAllFilteredBtn","clearSelectionBtn","bulkCount","bulkActions","bulkRemoveReplace","bulkWrongLanguage","bulkRestore","clearLibraryBtn","startFreshBtn","dashboardStateBanner","downloadStateBanner","downloadsPageStateBanner","heroProgressTitle","heroProgressSub","heroProgressCount","heroProgressPct","heroProgressFill","heroStatusText","activeJobsGrid","dgDownloading","dgDownloadingCount","dgQueued","dgQueuedCount","dgCompleted","dgCompletedCount","dgFailed","dgFailedCount","bulkBar","dashActiveCount","dashQueuedCount","dashCompletedCount","dashFailedCount"].forEach(id=>els[id]=$(id));}
+function cache(){["languageSelect","targetInput","modeSelect","primaryActionBtn","secondaryStopBtn","statTarget","statAccepted","statDownloadable","statDownloaded","statRemaining","statSourceMissing","statSourceInvalid","statFound","statRejected","discoveryStatus","downloadStatus","discoveryBar","discoveryProgressText","discoveryPercent","scannedCount","underCount","notMovieCount","wrongLanguageCount","duplicateCount","apiCount","retryCount","currentQuery","discoveryMessage","recentMovies","allMovies","activityLog","downloadSummary","movieSearch","movieStatusFilter","refreshMovies","downloadPrimaryBtn","downloadStopBtn","minimumDuration","maxConcurrentDownloads","minFreeDiskGb","downloadRoot","chooseFolder","saveSettings","settingsSaveStatus","apiConfigured","movieModal","modalBody","toastWrap","networkDot","networkText","clearActivity","moviesTitle","selectPageBtn","selectAllFilteredBtn","clearSelectionBtn","bulkCount","bulkActions","bulkRemoveReplace","bulkWrongLanguage","bulkRestore","clearLibraryBtn","startFreshBtn","dashboardStateBanner","downloadStateBanner","downloadsPageStateBanner","heroProgressTitle","heroProgressSub","heroProgressCount","heroProgressPct","heroProgressFill","heroStatusText","activeJobsGrid","dgDownloading","dgDownloadingCount","dgQueued","dgQueuedCount","dgCompleted","dgCompletedCount","dgFailed","dgFailedCount","bulkBar","dashActiveCount","dashQueuedCount","dashCompletedCount","dashFailedCount","dashDownloadPrimaryBtn","dashDownloadStopBtn"].forEach(id=>els[id]=$(id));}
 // New YouTube-only controls are intentionally kept outside the legacy cache list.
 els.downloadQuality=$("downloadQuality");els.bulkDownloadSelected=$("bulkDownloadSelected");
 async function api(url,options={}){const opts={headers:{"Content-Type":"application/json"},...options};const r=await fetch(url,opts);let b={};try{b=await r.json()}catch{}if(!r.ok||b.ok===false)throw new Error(b.error||`Request failed (${r.status})`);return b}
@@ -30,6 +30,19 @@ const DOWNLOAD_PHASE_LABELS={
   paused:{label:"Resume",cls:"primary",disabled:false},
   stopping:{label:"Stopping…",cls:"",disabled:true},
   error:{label:"Retry",cls:"primary",disabled:false},
+  "waiting-source":{label:"No downloads queued",cls:"",disabled:true},
+};
+// Same phases as DOWNLOAD_PHASE_LABELS, worded so the Dashboard's download
+// controls are never mistaken for the discovery Start/Pause/Stop controls
+// sitting right above them.
+const DASH_DOWNLOAD_PHASE_LABELS={
+  idle:{label:"Start downloads",cls:"primary",disabled:false},
+  running:{label:"Pause downloads",cls:"primary",disabled:false},
+  "waiting-network":{label:"Waiting for internet…",cls:"",disabled:true},
+  "disk-low":{label:"Low disk space",cls:"",disabled:true},
+  paused:{label:"Resume downloads",cls:"primary",disabled:false},
+  stopping:{label:"Stopping…",cls:"",disabled:true},
+  error:{label:"Retry downloads",cls:"primary",disabled:false},
   "waiting-source":{label:"No downloads queued",cls:"",disabled:true},
 };
 function deriveDiscoveryPhase(){
@@ -78,6 +91,12 @@ function renderDownloadControls(){
   const showStop=["running","waiting-network","disk-low","paused","stopping","waiting-source"].includes(phase);
   els.downloadStopBtn.classList.toggle("hidden",!showStop);
   els.downloadStopBtn.disabled=phase==="stopping";
+  if(els.dashDownloadPrimaryBtn){
+    const dashInfo=DASH_DOWNLOAD_PHASE_LABELS[phase]||DASH_DOWNLOAD_PHASE_LABELS.idle;
+    applyButtonPhase(els.dashDownloadPrimaryBtn,dashInfo);
+    els.dashDownloadStopBtn.classList.toggle("hidden",!showStop);
+    els.dashDownloadStopBtn.disabled=phase==="stopping";
+  }
 }
 async function dashboardPrimaryAction(){
   const mode=els.modeSelect.value,phase=combineDashboardPhase(),dPhase=deriveDiscoveryPhase(),dlPhase=deriveDownloadPhase();
@@ -189,10 +208,19 @@ function renderActiveJobs(jobs){
 }
 function downloadRowHtml(m,kind){
   const thumb=m.thumbnail_url?`<img loading="lazy" src="${esc(m.thumbnail_url)}" alt="">`:"";
-  let sub="";
+  let sub="",bytes,total;
   if(kind==="downloading"){
-    const pct=m.total_bytes?Math.min(100,(m.bytes_downloaded||0)/m.total_bytes*100):null;
-    sub=`${jobStageLabel(m._stage||"DOWNLOADING")}${pct!=null?` • ${pct.toFixed(0)}%`:""}${m.download_speed_bps?` • ${fmtBytes(m.download_speed_bps)}/s`:""}${m.download_eta_seconds!=null?` • ETA ${fmtTime(m.download_eta_seconds)}`:""}`;
+    // Live numbers come from the active job (kept fresh by download_progress/
+    // download_stage), not the movie row -- that only reflects the last
+    // loadMovies() snapshot and would otherwise show stale bytes/stage.
+    const j=m._job||{};
+    bytes=j.bytes_downloaded!=null?j.bytes_downloaded:m.bytes_downloaded;
+    total=j.total_bytes!=null?j.total_bytes:m.total_bytes;
+    const speed=j.speed_bps!=null?j.speed_bps:m.download_speed_bps;
+    const eta=j.eta_seconds!=null?j.eta_seconds:m.download_eta_seconds;
+    const stage=j.stage||m._stage||"DOWNLOADING";
+    const pct=total?Math.min(100,(bytes||0)/total*100):null;
+    sub=`${jobStageLabel(stage)}${pct!=null?` • ${pct.toFixed(0)}%`:""}${speed?` • ${fmtBytes(speed)}/s`:""}${eta!=null?` • ETA ${fmtTime(eta)}`:""}`;
   }else if(kind==="queued"){
     sub="Waiting for a free download slot";
   }else if(kind==="completed"){
@@ -206,17 +234,18 @@ function downloadRowHtml(m,kind){
       <div class="download-row-title">${esc(m.title)}</div>
       <div class="download-row-sub">${esc(sub)}</div>
     </div>
-    <div class="download-row-stat">${kind==="downloading"&&m.total_bytes?`<strong>${fmtBytes(m.bytes_downloaded)} / ${fmtBytes(m.total_bytes)}</strong>`:""}</div>
+    <div class="download-row-stat">${kind==="downloading"&&total?`<strong>${fmtBytes(bytes)} / ${fmtBytes(total)}</strong>`:""}</div>
   </div>`;
 }
 function renderDownloadsPage(rows){
-  const activeIds=new Set((state.runtime?.downloads?.active_jobs||[]).map(j=>Number(j.movie_id)));
-  const stageByMovie={};
-  (state.runtime?.downloads?.active_jobs||[]).forEach(j=>{stageByMovie[j.movie_id]=j.stage});
+  const activeJobs=state.runtime?.downloads?.active_jobs||[];
+  const jobByMovie={};
+  activeJobs.forEach(j=>{jobByMovie[Number(j.movie_id)]=j});
+  const activeIds=new Set(activeJobs.map(j=>Number(j.movie_id)));
   const downloading=[],queued=[],completed=[],failed=[];
   rows.forEach(m=>{
     const id=Number(m.id);
-    if(activeIds.has(id)){m._stage=stageByMovie[id];downloading.push(m)}
+    if(activeIds.has(id)){m._job=jobByMovie[id];m._stage=m._job&&m._job.stage;downloading.push(m)}
     else if(m.download_status==="DOWNLOADED")completed.push(m);
     else if(m.download_status==="FAILED")failed.push(m);
     else if(["READY","WAITING_NETWORK","QUEUED"].includes(m.download_status)||m.downloadable)queued.push(m);
@@ -235,18 +264,23 @@ function renderStats(rt){const target=Number(state.target||0),accepted=Number(st
   // instead of several unrelated counters.
   const mode=els.modeSelect?.value||state.mode||"discover";
   const langLabel=state.language?state.language[0].toUpperCase()+state.language.slice(1):"";
-  const heroTitle=mode==="download"?`Downloading your ${langLabel} movies`:mode==="both"?`Finding and downloading your ${langLabel} movies`:`Finding your ${langLabel} movies`;
+  // Discovery reaching its target is NOT the same as the overall job being
+  // done -- downloads can still be running. Keep the numbers about discovery
+  // only ("found", not "ready") and say so explicitly when mode is "both".
+  const discoveryComplete=d.status==="COMPLETED"&&progress>=target&&target>0;
+  const downloadsIdle=activeJobs.length===0&&dlWaiting===0;
+  const heroTitle=discoveryComplete?"Discovery complete":mode==="download"?`Downloading your ${langLabel} movies`:mode==="both"?`Finding and downloading your ${langLabel} movies`:`Finding your ${langLabel} movies`;
   els.heroProgressTitle.textContent=heroTitle;
-  els.heroProgressCount.innerHTML=`${progress.toLocaleString()} <small>of ${target.toLocaleString()} ready</small>`;
+  els.heroProgressCount.innerHTML=`${progress.toLocaleString()} <small>of ${target.toLocaleString()} found</small>`;
   els.heroProgressPct.textContent=`${pct.toFixed(0)}%`;
   els.heroProgressFill.style.width=`${pct}%`;
-  const overallStatus=(d.status==="ERROR"||dl.status==="ERROR")?"ERROR":(dl.status==="DISK_LOW")?"DISK_LOW":(d.network_wait||dl.network_wait)?"WAITING_NETWORK":(d.status==="RUNNING"||dl.status==="RUNNING")?"RUNNING":(d.status==="PAUSED"||dl.status==="PAUSED")?"PAUSED":(d.status==="COMPLETED"&&progress>=target&&target>0)?"COMPLETED":"IDLE";
+  const overallStatus=(d.status==="ERROR"||dl.status==="ERROR")?"ERROR":(dl.status==="DISK_LOW")?"DISK_LOW":(d.network_wait||dl.network_wait)?"WAITING_NETWORK":(d.status==="RUNNING"||dl.status==="RUNNING")?"RUNNING":(d.status==="PAUSED"||dl.status==="PAUSED")?"PAUSED":discoveryComplete?"COMPLETED":"IDLE";
   els.heroStatusText.textContent=overallStatus==="WAITING_NETWORK"?"Waiting for internet":overallStatus==="DISK_LOW"?"Paused — low disk space":runtimeStatusLabel(overallStatus);
-  els.heroProgressSub.textContent=target===0?"Choose a target and press Start to begin.":progress>=target&&target>0?"Target reached.":overallStatus==="IDLE"?"Press Start to begin.":"Movie Manager is working in the background — you can leave this open or come back later.";
+  els.heroProgressSub.textContent=target===0?"Choose a target and press Start to begin.":discoveryComplete&&mode==="both"?(downloadsIdle?"All movies found and downloaded.":"Downloads are still running below."):discoveryComplete?"All movies found.":progress>=target&&target>0?"Target reached.":overallStatus==="IDLE"?"Press Start to begin.":"Movie Manager is working in the background — you can leave this open or come back later.";
   const banner=bannerStatusFor(rt);
   renderStateBanner(els.dashboardStateBanner,banner.status,banner.message);
   renderStateBanner(els.downloadStateBanner,dl.status==="DISK_LOW"?"DISK_LOW":dl.network_wait?"WAITING_NETWORK":null);
-  renderDashboardControls();renderDownloadControls();}
+  renderDashboardControls();renderDownloadControls();renderDownloadsPage(state.movies);}
 const PROVIDER_LABELS={internet_archive:"Internet Archive",youtube:"YouTube"};
 function providerLabel(m){return PROVIDER_LABELS[m.provider]||"YouTube"}
 function fileExtLabel(url){const m=/\.([a-z0-9]{2,4})(?:$|\?)/i.exec(url||"");return m?m[1].toUpperCase():""}
@@ -278,21 +312,43 @@ async function resetFresh(){if(prompt("Start fresh? This clears catalogue, disco
 function bindResetControls(){els.clearLibraryBtn?.addEventListener("click",()=>clearLibrary().catch(e=>toast(e.message,"error")));els.startFreshBtn?.addEventListener("click",()=>resetFresh().catch(e=>toast(e.message,"error")));document.addEventListener("click",e=>{const b=e.target.closest("[data-delete]");if(b)deleteFromLibrary(b.dataset.delete).catch(x=>toast(x.message,"error"))})}
 function closeModal(){els.movieModal.classList.add("hidden");els.modalBody.innerHTML="";if(els._lastFocused&&els._lastFocused.focus)els._lastFocused.focus()}
 function network(){const on=navigator.onLine;els.networkDot.className=`dot ${on?"online":"offline"}`;els.networkText.textContent=on?"Browser online":"Browser offline"}
-function bind(){document.querySelectorAll(".nav-item").forEach(b=>b.addEventListener("click",()=>{document.querySelectorAll(".nav-item").forEach(x=>{x.classList.remove("active");x.removeAttribute("aria-current")});b.classList.add("active");b.setAttribute("aria-current","page");document.querySelectorAll(".view").forEach(x=>x.classList.remove("active"));$(`view-${b.dataset.view}`).classList.add("active");$("pageTitle").textContent=b.textContent.trim()}));document.addEventListener("keydown",e=>{if(e.key==="Escape"){if(!els.movieModal.classList.contains("hidden"))closeModal();closeCardMenus()}});document.querySelectorAll("[data-go]").forEach(b=>b.addEventListener("click",()=>document.querySelector(`.nav-item[data-view="${b.dataset.go}"]`).click()));els.languageSelect.addEventListener("change",async()=>{state.language=els.languageSelect.value;clearSelection();await api("/api/settings",{method:"POST",body:JSON.stringify({active_language:state.language})});await bootstrap()});els.selectPageBtn.addEventListener("click",selectPage);els.selectAllFilteredBtn.addEventListener("click",()=>selectAllFiltered().catch(e=>toast(e.message,"error")));els.clearSelectionBtn.addEventListener("click",clearSelection);els.bulkRemoveReplace.addEventListener("click",()=>bulkAction("remove"));els.bulkWrongLanguage.addEventListener("click",()=>bulkAction("wrong-language"));els.bulkRestore.addEventListener("click",()=>bulkAction("restore"));document.body.addEventListener("change",e=>{const cb=e.target.closest("[data-select]");if(cb)toggleSelect(cb.dataset.select,cb.checked)});els.primaryActionBtn.addEventListener("click",()=>dashboardPrimaryAction());els.secondaryStopBtn.addEventListener("click",()=>dashboardStopAction());els.targetInput.addEventListener("input",()=>renderDashboardControls());els.modeSelect.addEventListener("change",()=>{state.mode=els.modeSelect.value;renderDashboardControls()});els.downloadPrimaryBtn.addEventListener("click",()=>downloadPrimaryAction());els.downloadStopBtn.addEventListener("click",()=>downloadStopAction());els.refreshMovies.addEventListener("click",()=>loadMovies().catch(e=>toast(e.message,"error")));els.movieStatusFilter.addEventListener("change",()=>{clearSelection();loadMovies().catch(()=>{})});let timer;els.movieSearch.addEventListener("input",()=>{clearTimeout(timer);timer=setTimeout(()=>{clearSelection();loadMovies().catch(()=>{})},250)});els.clearActivity.addEventListener("click",()=>els.activityLog.innerHTML="");els.chooseFolder.addEventListener("click",async()=>{try{const r=await api("/api/settings/select-folder",{method:"POST",body:"{}"});if(r.path){els.downloadRoot.value=r.path;updateSettingsSaveUI()}}catch(e){toast(e.message,"error")}});["maxConcurrentDownloads","downloadQuality","minFreeDiskGb"].forEach(id=>els[id].addEventListener("change",()=>updateSettingsSaveUI()));els.downloadRoot.addEventListener("input",()=>updateSettingsSaveUI());els.saveSettings.addEventListener("click",async()=>{try{const r=await api("/api/settings",{method:"POST",body:JSON.stringify(currentSettingsValues())});els.downloadRoot.value=r.settings.download_root||"";els.maxConcurrentDownloads.value=r.settings.max_concurrent_downloads;els.minFreeDiskGb.value=r.settings.min_free_disk_gb;els.downloadQuality.value=r.settings.download_quality||els.downloadQuality.value;snapshotSettings();updateSettingsSaveUI({text:"Settings saved ✓",cls:"ok"});toast("Settings saved.");await refresh()}catch(e){updateSettingsSaveUI({text:"Could not save settings",cls:"error"});toast(e.message,"error")}});document.body.addEventListener("click",async e=>{const o=e.target.closest("[data-open]"),yt=e.target.closest("[data-youtube]"),r=e.target.closest("[data-reject]"),wl=e.target.closest("[data-reject-wrong-language]"),rs=e.target.closest("[data-restore]"),cl=e.target.closest("[data-close-modal]"),sv=e.target.closest("#saveDirectSource"),retryDl=e.target.closest("[data-retry-download]"),mt=e.target.closest("[data-menu-toggle]"),qd=e.target.closest("[data-quick-download]");if(mt){e.stopPropagation();const list=mt.nextElementSibling;const willOpen=list.classList.contains("hidden");closeCardMenus();if(willOpen){list.classList.remove("hidden");mt.setAttribute("aria-expanded","true")}return}if(!e.target.closest(".card-menu"))closeCardMenus();if(qd){try{const r=await api("/api/movies/bulk/download",{method:"POST",body:JSON.stringify({ids:[Number(qd.dataset.quickDownload)],language:state.language})});toast(r.queued?"Movie queued for download.":"Could not queue this movie.");await refresh();await loadMovies()}catch(x){toast(x.message,"error")}return}if(o)showMovie(o.dataset.open).catch(x=>toast(x.message,"error"));if(yt)window.open(yt.dataset.youtube,"_blank","noopener");if(cl)closeModal();if(sv)saveSource(sv.dataset.id).catch(x=>toast(x.message,"error"));if(retryDl){api(`/api/movies/${retryDl.dataset.retryDownload}/retry-download`,{method:"POST"}).then(()=>{toast("Download queued for retry.");return api("/api/downloads/start",{method:"POST",body:JSON.stringify({language:state.language})})}).catch(x=>toast(x.message,"error"))}if(r&&confirm("Remove this movie and prevent the same video from being accepted again?")){try{await api(`/api/movies/${r.dataset.reject}/reject`,{method:"POST",body:JSON.stringify({reason:"USER_REJECTED"})});toast("Movie removed. Replacement can be discovered automatically.");await loadMovies();await refresh()}catch(x){toast(x.message,"error")}}if(wl&&confirm("Reject this movie as wrong language and find a replacement?")){try{await api(`/api/movies/${wl.dataset.rejectWrongLanguage}/reject`,{method:"POST",body:JSON.stringify({reason:"WRONG_LANGUAGE"})});toast("Movie marked as wrong language. Replacement can be discovered automatically.");await loadMovies();await refresh()}catch(x){toast(x.message,"error")}}if(rs){try{await api(`/api/movies/${rs.dataset.restore}/restore`,{method:"POST"});toast("Movie restored.");await loadMovies();await refresh()}catch(x){toast(x.message,"error")}}});window.addEventListener("online",network);window.addEventListener("offline",network)}
+function bind(){document.querySelectorAll(".nav-item").forEach(b=>b.addEventListener("click",()=>{document.querySelectorAll(".nav-item").forEach(x=>{x.classList.remove("active");x.removeAttribute("aria-current")});b.classList.add("active");b.setAttribute("aria-current","page");document.querySelectorAll(".view").forEach(x=>x.classList.remove("active"));$(`view-${b.dataset.view}`).classList.add("active");$("pageTitle").textContent=b.textContent.trim()}));document.addEventListener("keydown",e=>{if(e.key==="Escape"){if(!els.movieModal.classList.contains("hidden"))closeModal();closeCardMenus()}});document.querySelectorAll("[data-go]").forEach(b=>b.addEventListener("click",()=>document.querySelector(`.nav-item[data-view="${b.dataset.go}"]`).click()));els.languageSelect.addEventListener("change",async()=>{state.language=els.languageSelect.value;clearSelection();await api("/api/settings",{method:"POST",body:JSON.stringify({active_language:state.language})});await bootstrap()});els.selectPageBtn.addEventListener("click",selectPage);els.selectAllFilteredBtn.addEventListener("click",()=>selectAllFiltered().catch(e=>toast(e.message,"error")));els.clearSelectionBtn.addEventListener("click",clearSelection);els.bulkRemoveReplace.addEventListener("click",()=>bulkAction("remove"));els.bulkWrongLanguage.addEventListener("click",()=>bulkAction("wrong-language"));els.bulkRestore.addEventListener("click",()=>bulkAction("restore"));document.body.addEventListener("change",e=>{const cb=e.target.closest("[data-select]");if(cb)toggleSelect(cb.dataset.select,cb.checked)});els.primaryActionBtn.addEventListener("click",()=>dashboardPrimaryAction());els.secondaryStopBtn.addEventListener("click",()=>dashboardStopAction());els.targetInput.addEventListener("input",()=>renderDashboardControls());els.modeSelect.addEventListener("change",()=>{state.mode=els.modeSelect.value;renderDashboardControls()});els.downloadPrimaryBtn.addEventListener("click",()=>downloadPrimaryAction());els.downloadStopBtn.addEventListener("click",()=>downloadStopAction());els.dashDownloadPrimaryBtn?.addEventListener("click",()=>downloadPrimaryAction());els.dashDownloadStopBtn?.addEventListener("click",()=>downloadStopAction());els.refreshMovies.addEventListener("click",()=>loadMovies().catch(e=>toast(e.message,"error")));els.movieStatusFilter.addEventListener("change",()=>{clearSelection();loadMovies().catch(()=>{})});let timer;els.movieSearch.addEventListener("input",()=>{clearTimeout(timer);timer=setTimeout(()=>{clearSelection();loadMovies().catch(()=>{})},250)});els.clearActivity.addEventListener("click",()=>els.activityLog.innerHTML="");els.chooseFolder.addEventListener("click",async()=>{try{const r=await api("/api/settings/select-folder",{method:"POST",body:"{}"});if(r.path){els.downloadRoot.value=r.path;updateSettingsSaveUI()}}catch(e){toast(e.message,"error")}});["maxConcurrentDownloads","downloadQuality","minFreeDiskGb"].forEach(id=>els[id].addEventListener("change",()=>updateSettingsSaveUI()));els.downloadRoot.addEventListener("input",()=>updateSettingsSaveUI());els.saveSettings.addEventListener("click",async()=>{try{const r=await api("/api/settings",{method:"POST",body:JSON.stringify(currentSettingsValues())});els.downloadRoot.value=r.settings.download_root||"";els.maxConcurrentDownloads.value=r.settings.max_concurrent_downloads;els.minFreeDiskGb.value=r.settings.min_free_disk_gb;els.downloadQuality.value=r.settings.download_quality||els.downloadQuality.value;snapshotSettings();updateSettingsSaveUI({text:"Settings saved ✓",cls:"ok"});toast("Settings saved.");await refresh()}catch(e){updateSettingsSaveUI({text:"Could not save settings",cls:"error"});toast(e.message,"error")}});document.body.addEventListener("click",async e=>{const o=e.target.closest("[data-open]"),yt=e.target.closest("[data-youtube]"),r=e.target.closest("[data-reject]"),wl=e.target.closest("[data-reject-wrong-language]"),rs=e.target.closest("[data-restore]"),cl=e.target.closest("[data-close-modal]"),sv=e.target.closest("#saveDirectSource"),retryDl=e.target.closest("[data-retry-download]"),mt=e.target.closest("[data-menu-toggle]"),qd=e.target.closest("[data-quick-download]");if(mt){e.stopPropagation();const list=mt.nextElementSibling;const willOpen=list.classList.contains("hidden");closeCardMenus();if(willOpen){list.classList.remove("hidden");mt.setAttribute("aria-expanded","true")}return}if(!e.target.closest(".card-menu"))closeCardMenus();if(qd){try{const r=await api("/api/movies/bulk/download",{method:"POST",body:JSON.stringify({ids:[Number(qd.dataset.quickDownload)],language:state.language})});toast(r.queued?"Movie queued for download.":"Could not queue this movie.");await refresh();await loadMovies()}catch(x){toast(x.message,"error")}return}if(o)showMovie(o.dataset.open).catch(x=>toast(x.message,"error"));if(yt)window.open(yt.dataset.youtube,"_blank","noopener");if(cl)closeModal();if(sv)saveSource(sv.dataset.id).catch(x=>toast(x.message,"error"));if(retryDl){api(`/api/movies/${retryDl.dataset.retryDownload}/retry-download`,{method:"POST"}).then(()=>{toast("Download queued for retry.");return api("/api/downloads/start",{method:"POST",body:JSON.stringify({language:state.language})})}).catch(x=>toast(x.message,"error"))}if(r&&confirm("Remove this movie and prevent the same video from being accepted again?")){try{await api(`/api/movies/${r.dataset.reject}/reject`,{method:"POST",body:JSON.stringify({reason:"USER_REJECTED"})});toast("Movie removed. Replacement can be discovered automatically.");await loadMovies();await refresh()}catch(x){toast(x.message,"error")}}if(wl&&confirm("Reject this movie as wrong language and find a replacement?")){try{await api(`/api/movies/${wl.dataset.rejectWrongLanguage}/reject`,{method:"POST",body:JSON.stringify({reason:"WRONG_LANGUAGE"})});toast("Movie marked as wrong language. Replacement can be discovered automatically.");await loadMovies();await refresh()}catch(x){toast(x.message,"error")}}if(rs){try{await api(`/api/movies/${rs.dataset.restore}/restore`,{method:"POST"});toast("Movie restored.");await loadMovies();await refresh()}catch(x){toast(x.message,"error")}}});window.addEventListener("online",network);window.addEventListener("offline",network)}
 function movieTitleById(id){const m=state.movies.find(x=>Number(x.id)===Number(id));if(m)return m.title;const j=(state.runtime?.downloads?.active_jobs||[]).find(x=>Number(x.movie_id)===Number(id));return j?.title||`Movie #${id}`}
+function findActiveJob(movieId){const jobs=state.runtime?.downloads?.active_jobs;return jobs&&jobs.find(j=>Number(j.movie_id)===Number(movieId))}
+function applyDownloadProgress(p){
+  const job=findActiveJob(p.movie_id);
+  if(job){
+    job.bytes_downloaded=p.bytes_downloaded;job.total_bytes=p.total_bytes;
+    job.speed_bps=p.speed_bps;job.eta_seconds=p.eta_seconds;
+    // A progress tick only ever fires while bytes are actually flowing, so
+    // the job is DOWNLOADING now even if its last known stage was QUEUED.
+    job.stage="DOWNLOADING";
+  }
+  renderStats(state.runtime);
+}
+function applyDownloadStage(p){
+  const job=findActiveJob(p.movie_id);
+  if(job)job.stage=p.stage;
+  renderStats(state.runtime);
+}
 const progressLogState={};
-function events(){const es=new EventSource("/api/events");es.addEventListener("movie_processed",async e=>{const d=JSON.parse(e.data).payload,m=d.movie,res=d.result;const msg=res==="ACCEPTED"?`Accepted: ${m.title}`:res==="TARGET_REACHED"?`Target already reached, kept as pending: ${m.title}`:res==="UNDER_DURATION"?`Skipped under 60m: ${m.title}`:res==="WRONG_LANGUAGE"?`Skipped wrong language: ${m.title}`:res==="DUPLICATE"?`Duplicate skipped: ${m.title}`:`Rejected: ${m.title}`;addLog(msg,res==="ACCEPTED"?"log-good":"");await refresh();if(res==="ACCEPTED"||res==="TARGET_REACHED")await loadMovies()});es.addEventListener("source_resolved",async e=>{const p=JSON.parse(e.data).payload;if(p.source_status==="SOURCE_INVALID")addLog(`Source invalid for movie #${p.movie_id}: ${p.error||""}`,"log-bad");await refresh();await loadMovies()});es.addEventListener("sources_bulk_resolved",async e=>{const p=JSON.parse(e.data).payload;addLog(`Bulk source resolution: ${p.ready} ready, ${p.missing} missing, ${p.invalid} invalid.`,"log-good");await refresh();await loadMovies()});es.addEventListener("discovery_status",async e=>{const p=JSON.parse(e.data).payload;state.runtime=state.runtime||{};state.runtime.discovery=p;renderStats(state.runtime);if(["COMPLETED","ERROR","STOPPED"].includes(p.status)){addLog(`Discovery ${p.status.toLowerCase()}: ${p.message}`,p.status==="ERROR"?"log-bad":"");await refresh();await loadMovies()}});es.addEventListener("download_status",e=>{const p=JSON.parse(e.data).payload;state.runtime=state.runtime||{};state.runtime.downloads=p;renderStats(state.runtime);addLog(p.message||`Download status: ${p.status}`)});es.addEventListener("download_progress",e=>{const p=JSON.parse(e.data).payload;const jobs=state.runtime?.downloads?.active_jobs;const job=jobs&&jobs.find(j=>Number(j.movie_id)===Number(p.movie_id));if(job){job.bytes_downloaded=p.bytes_downloaded;job.total_bytes=p.total_bytes;job.speed_bps=p.speed_bps;job.eta_seconds=p.eta_seconds;renderActiveJobs(jobs)}
+function logDownloadProgress(p){
   const pct=p.total_bytes?Math.min(100,(p.bytes_downloaded||0)/p.total_bytes*100):null;
-  const last=progressLogState[p.movie_id]||{time:0,pct:-100};
+  const last=progressLogState[p.movie_id]||{time:0,pct:-100,text:null};
   const now=Date.now();
   if(now-last.time>=2500||(pct!=null&&Math.abs(pct-last.pct)>=5)){
-    progressLogState[p.movie_id]={time:now,pct:pct==null?last.pct:pct};
     const title=movieTitleById(p.movie_id);
     const pctLabel=pct!=null?`${pct.toFixed(0)}%`:"";
     const speedLabel=p.speed_bps?`${fmtBytes(p.speed_bps)}/s`:"";
-    addLog(`↓ ${title}${pctLabel?" — "+pctLabel:""}${speedLabel?" — "+speedLabel:""}`);
+    const text=`↓ ${title}${pctLabel?" — "+pctLabel:""}${speedLabel?" — "+speedLabel:""}`;
+    // Guard against a duplicate line for this movie -- the time/percentage
+    // throttle above can still re-fire while a stalled transfer reports the
+    // same rounded numbers repeatedly.
+    if(text!==last.text)addLog(text);
+    progressLogState[p.movie_id]={time:now,pct:pct==null?last.pct:pct,text};
   }
-});
-es.addEventListener("download_stage",e=>{const p=JSON.parse(e.data).payload;if(p.stage==="MERGING")addLog("Combining video and audio...");else if(p.stage==="VERIFYING")addLog("Checking movie...")});
-es.addEventListener("download_complete",async e=>{const p=JSON.parse(e.data).payload;delete progressLogState[p.movie_id];addLog(`✓ ${movieTitleById(p.movie_id)} completed`,"log-good");toast("Movie download completed.");await refresh();await loadMovies()});es.addEventListener("network_wait",e=>{const p=JSON.parse(e.data).payload;addLog(`Network/source interruption. Auto retry in ${p.delay}s. ${p.error||""}`,"log-bad")});es.addEventListener("error",e=>{const p=JSON.parse(e.data).payload;const msg=p.blocked?`⚠ ${p.message}`:`${p.scope||"App"} error: ${p.message}`;addLog(msg,"log-bad");toast(p.message||"An error occurred.","error")})}
+}
+function events(){const es=new EventSource("/api/events");es.addEventListener("movie_processed",async e=>{const d=JSON.parse(e.data).payload,m=d.movie,res=d.result;const msg=res==="ACCEPTED"?`Accepted: ${m.title}`:res==="TARGET_REACHED"?`Target already reached, kept as pending: ${m.title}`:res==="UNDER_DURATION"?`Skipped under 60m: ${m.title}`:res==="WRONG_LANGUAGE"?`Skipped wrong language: ${m.title}`:res==="DUPLICATE"?`Duplicate skipped: ${m.title}`:`Rejected: ${m.title}`;addLog(msg,res==="ACCEPTED"?"log-good":"");await refresh();if(res==="ACCEPTED"||res==="TARGET_REACHED")await loadMovies()});es.addEventListener("source_resolved",async e=>{const p=JSON.parse(e.data).payload;if(p.source_status==="SOURCE_INVALID")addLog(`Source invalid for movie #${p.movie_id}: ${p.error||""}`,"log-bad");await refresh();await loadMovies()});es.addEventListener("sources_bulk_resolved",async e=>{const p=JSON.parse(e.data).payload;addLog(`Bulk source resolution: ${p.ready} ready, ${p.missing} missing, ${p.invalid} invalid.`,"log-good");await refresh();await loadMovies()});es.addEventListener("discovery_status",async e=>{const p=JSON.parse(e.data).payload;state.runtime=state.runtime||{};state.runtime.discovery=p;renderStats(state.runtime);if(["COMPLETED","ERROR","STOPPED"].includes(p.status)){addLog(`Discovery ${p.status.toLowerCase()}: ${p.message}`,p.status==="ERROR"?"log-bad":"");await refresh();await loadMovies()}});es.addEventListener("download_status",e=>{const p=JSON.parse(e.data).payload;state.runtime=state.runtime||{};state.runtime.downloads=p;renderStats(state.runtime);addLog(p.message||`Download status: ${p.status}`)});es.addEventListener("download_progress",e=>{const p=JSON.parse(e.data).payload;applyDownloadProgress(p);logDownloadProgress(p)});
+es.addEventListener("download_stage",e=>{const p=JSON.parse(e.data).payload;applyDownloadStage(p);if(p.stage==="MERGING")addLog("Combining video and audio...");else if(p.stage==="VERIFYING")addLog("Checking movie...")});
+es.addEventListener("download_complete",async e=>{const p=JSON.parse(e.data).payload;delete progressLogState[p.movie_id];addLog(`✓ ${movieTitleById(p.movie_id)} completed`,"log-good");toast("Movie download completed.");await refresh();await loadMovies()});es.addEventListener("network_wait",e=>{const p=JSON.parse(e.data).payload;addLog(`Network/source interruption. Auto retry in ${p.delay}s. ${p.error||""}`,"log-bad")});es.addEventListener("download_retry",async e=>{await refresh();await loadMovies()});es.addEventListener("error",async e=>{const p=JSON.parse(e.data).payload;const msg=p.blocked?`⚠ ${p.message}`:`${p.scope||"App"} error: ${p.message}`;addLog(msg,"log-bad");toast(p.message||"An error occurred.","error");if(p.scope==="download"){await refresh();await loadMovies()}})}
 document.addEventListener("DOMContentLoaded",async()=>{cache();els.bulkDownloadSelected?.addEventListener("click",()=>downloadSelected().catch(e=>toast(e.message,"error")));bind();bindResetControls();network();events();try{await bootstrap();setInterval(refresh,5000)}catch(e){toast(e.message,"error")}});

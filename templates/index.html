@@ -158,6 +158,8 @@
           <div class="settings-section">
             <div class="settings-section-head"><h4>YouTube</h4><p>Your connection to YouTube for discovery and downloads.</p></div>
             <div class="setting-row"><div><strong>YouTube connection</strong><p>Your private key stays inside the local <code>.env</code> file and is never shown here.</p></div><span class="status-pill" id="apiConfigured">CHECKING</span></div>
+            <div class="setting-row"><div><strong>Use signed-in browser session</strong><p>Lets downloads use your existing signed-in YouTube session from a local browser, to avoid "Sign in to confirm you're not a bot" blocks.</p></div><label class="switch"><input type="checkbox" id="youtubeUseBrowserSession" aria-label="Use signed-in browser session"><span></span></label></div>
+            <div class="setting-row"><div><strong>Browser</strong><p>Which browser's signed-in YouTube session to use.</p></div><select id="youtubeBrowser" aria-label="Browser for signed-in YouTube session"><option value="chrome">Chrome</option><option value="edge">Edge</option><option value="firefox">Firefox</option></select></div>
           </div>
 
           <div class="settings-section">

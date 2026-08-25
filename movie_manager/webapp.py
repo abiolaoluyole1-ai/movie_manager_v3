@@ -8,7 +8,7 @@ from flask import Flask, Response, jsonify, render_template, request, send_file
 
 from .config import (
     YOUTUBE_BLOCKED_COOLDOWN_SECONDS, YOUTUBE_BLOCKED_MESSAGE,
-    clamp_concurrency, clamp_download_quality, clamp_min_free_disk_gb,
+    clamp_concurrency, clamp_download_quality, clamp_min_free_disk_gb, clamp_youtube_browser,
 )
 from .db import (
     all_settings, all_video_ids, apply_source_resolution, bulk_reject_movies,
@@ -455,6 +455,7 @@ def create_app():
         allowed = {
             "active_language", "maintain_target", "download_root", "count_only_downloadable",
             "max_concurrent_downloads", "min_free_disk_gb", "download_quality",
+            "youtube_use_browser_session", "youtube_browser",
         }
         for key, value in data.items():
             if key in allowed:
@@ -466,6 +467,8 @@ def create_app():
                     value = clamp_min_free_disk_gb(value)
                 elif key == "download_quality":
                     value = clamp_download_quality(value)
+                elif key == "youtube_browser":
+                    value = clamp_youtube_browser(value)
                 set_setting(key, value)
         return jsonify({"ok": True, "settings": all_settings()})
 

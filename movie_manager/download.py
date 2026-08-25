@@ -8,7 +8,7 @@ import requests
 from .config import (
     CONCURRENCY_DEFAULT, CONCURRENCY_MAX, CONCURRENCY_MIN,
     MIN_FREE_DISK_GB_DEFAULT, NETWORK_RETRY_SECONDS, YOUTUBE_BLOCKED_MESSAGE,
-    clamp_min_free_disk_gb, is_youtube_blocked_error,
+    clamp_min_free_disk_gb, clamp_youtube_browser, is_youtube_blocked_error,
 )
 from .db import get_setting, next_download_ready, update_download
 from .events import events
@@ -65,9 +65,28 @@ class YtDlpDownloadBackend:
             "ffmpeg_location": shutil.which("ffmpeg"), "progress_hooks": [hook], "quiet": True,
             "no_warnings": True, "retries": 3, "fragment_retries": 3,
         }
+        browser = None
+        if get_setting("youtube_use_browser_session", "0") == "1":
+            browser = clamp_youtube_browser(get_setting("youtube_browser", "chrome"))
+            # Reads that browser's own local cookie store at runtime (yt-dlp's
+            # --cookies-from-browser) -- nothing is copied, exported or logged.
+            options["cookiesfrombrowser"] = (browser,)
         self.controller._update_job(movie, worker_id, stage="PREPARING")
         update_download(movie["id"], download_status="DOWNLOADING", file_path=str(part), download_error=None)
         with yt_dlp.YoutubeDL(options) as ydl:
+            if browser:
+                try:
+                    # cookiesfrombrowser is only read lazily on first use, so
+                    # touch it now -- while it's still unambiguous that any
+                    # failure here is a cookie/session problem, not a
+                    # download one.
+                    ydl.cookiejar
+                except Exception as exc:
+                    name = browser.capitalize()
+                    raise RuntimeError(
+                        f"Could not use the signed-in {name} session.\n"
+                        f"Make sure you are signed into YouTube in {name} and try again."
+                    ) from exc
             ydl.extract_info(movie["youtube_url"], download=True)
         # yt-dlp has selected and remuxed the final file. Never fake an MP4 rename.
         if not final.exists() or final.stat().st_size <= 0:

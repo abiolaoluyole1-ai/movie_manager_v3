@@ -22,13 +22,20 @@ DEFAULTS = {
     "max_concurrent_downloads": str(CONCURRENCY_DEFAULT),
     "min_free_disk_gb": str(MIN_FREE_DISK_GB_DEFAULT),
     "download_quality": "1080",
+    "youtube_use_browser_session": "0",
+    "youtube_browser": "chrome",
 }
 
 DOWNLOAD_QUALITY_CHOICES = {"best", "1080", "720", "480"}
+YOUTUBE_BROWSER_CHOICES = {"chrome", "edge", "firefox"}
 
 
 def clamp_download_quality(value):
     return str(value) if str(value) in DOWNLOAD_QUALITY_CHOICES else "1080"
+
+
+def clamp_youtube_browser(value):
+    return str(value) if str(value) in YOUTUBE_BROWSER_CHOICES else "chrome"
 
 NETWORK_RETRY_SECONDS = [5, 10, 20, 30, 60]
 

@@ -524,6 +524,8 @@ def list_movies(language, status=None, limit=100, offset=0, search=""):
         where.append("status IN ('ACCEPTED','QUEUED','DOWNLOADING')")
     elif status == "DOWNLOADED":
         where.append("download_status='DOWNLOADED'")
+    elif status == "FAILED":
+        where.append("download_status='FAILED'")
     elif status == "REJECTED":
         where.append("status=?")
         params.append("REJECTED")
@@ -547,6 +549,8 @@ def list_movie_ids(language, status=None, search="", limit=20000):
         where.append("status IN ('ACCEPTED','QUEUED','DOWNLOADING')")
     elif status == "DOWNLOADED":
         where.append("download_status='DOWNLOADED'")
+    elif status == "FAILED":
+        where.append("download_status='FAILED'")
     elif status == "REJECTED":
         where.append("status=?")
         params.append("REJECTED")
@@ -874,3 +878,29 @@ def retry_download(movie_id):
           AND ((download_backend='YTDLP' AND provider='youtube') OR (download_url IS NOT NULL AND download_url<>''))
           AND download_status NOT IN ('DOWNLOADING','QUEUED','DOWNLOADED')
         """, (now_iso(), movie_id))
+
+
+def retry_failed_downloads(language=None):
+    """Requeue one failed downloadable movie for a safe retry check.
+
+    A batch of failures can be caused by a short-lived YouTube restriction.
+    Releasing one at a time avoids immediately repeating that restriction for
+    every failed title.
+    """
+    with _lock, connect() as conn:
+        where = [
+            "download_status='FAILED'",
+            "((download_backend='YTDLP' AND provider='youtube') OR (download_url IS NOT NULL AND download_url<>''))",
+        ]
+        params = []
+        if language:
+            where.append("language=?")
+            params.append(language)
+        cur = conn.execute(
+            f"""UPDATE movies SET download_status='READY', download_error=NULL,
+                retry_count=0, status=CASE WHEN status='REJECTED' THEN status ELSE 'ACCEPTED' END,
+                updated_at=? WHERE id=(SELECT id FROM movies
+                WHERE {' AND '.join(where)} ORDER BY updated_at ASC, id ASC LIMIT 1)""",
+            [now_iso(), *params],
+        )
+        return cur.rowcount

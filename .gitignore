@@ -7,3 +7,5 @@ pytest-cache-files-*/
 *.pyc
 .movie-manager-test-*.db*
 .tmp/
+.runtime-tmp/
+.tools/

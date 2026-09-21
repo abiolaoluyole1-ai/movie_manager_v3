@@ -31,11 +31,11 @@
 
         <div class="grid-two dash-top-row">
           <div class="hero glass compact">
-            <div><p class="eyebrow">CURRENT RUN</p><h2>Discover real full-length movies.</h2></div>
-            <div class="controls">
+            <div><p class="eyebrow">YOUR LIBRARY</p><h2>Movies, without the noise.</h2><p class="hero-help">Your completed movies and any next step are shown here.</p></div>
+            <div class="controls hidden" id="discoverySetup">
               <div class="field"><label for="targetInput">Target</label><input id="targetInput" type="number" min="1" value="30"></div>
-              <div class="field"><label for="modeSelect">Mode</label><select id="modeSelect"><option value="discover">Discover only</option><option value="download">Download only</option><option value="both">Discover + Download</option></select></div>
-              <button class="btn primary" id="primaryActionBtn">Start</button><button class="btn danger-ghost hidden" id="secondaryStopBtn">Stop</button>
+              <div class="field"><label for="modeSelect">Task</label><select id="modeSelect"><option value="discover">Find movies only</option><option value="both">Find, then download</option></select></div>
+              <button class="btn primary" id="primaryActionBtn">Find movies</button><button class="btn danger-ghost hidden" id="secondaryStopBtn">Stop finding</button>
             </div>
           </div>
 
@@ -51,7 +51,9 @@
           </section>
         </div>
 
-        <div class="grid-two dash-second-row">
+        <div id="sessionOutcome" class="session-outcome hidden" aria-live="polite"></div>
+
+        <div class="grid-two dash-second-row dashboard-detail hidden">
           <section class="panel glass">
             <div class="panel-head"><div><p class="eyebrow">DISCOVERY</p><h3>Live progress</h3></div><span class="status-pill" id="discoveryStatus">IDLE</span></div>
             <div class="detail-grid detail-grid-3">
@@ -69,7 +71,7 @@
           </section>
 
           <section class="panel glass">
-            <div class="panel-head"><div><p class="eyebrow">DOWNLOADS</p><h3>Downloading now</h3></div><div class="dash-download-controls"><button class="btn primary" id="dashDownloadPrimaryBtn">Start downloads</button><button class="btn danger-ghost hidden" id="dashDownloadStopBtn">Stop downloads</button><span class="status-pill" id="downloadStatus">IDLE</span></div></div>
+            <div class="panel-head"><div><p class="eyebrow">DOWNLOADS</p><h3>Your download queue</h3></div><div class="dash-download-controls"><button class="btn primary" id="dashDownloadPrimaryBtn">Start downloads</button><button class="btn danger-ghost hidden" id="dashDownloadStopBtn">Stop downloads</button><span class="status-pill" id="downloadStatus">IDLE</span></div></div>
             <div id="downloadStateBanner" class="state-banner hidden" role="status"></div>
             <div class="detail-grid detail-grid-4">
               <div><span>Active</span><b id="dashActiveCount">0</b></div><div><span>Queued</span><b id="dashQueuedCount">0</b></div><div><span>Completed</span><b id="dashCompletedCount">0</b></div><div><span>Failed</span><b id="dashFailedCount">0</b></div>
@@ -79,23 +81,33 @@
           </section>
         </div>
 
-        <section class="panel glass">
-          <div class="panel-head"><div><p class="eyebrow">ACTIVITY</p><h3>Live log</h3></div><button class="text-btn" id="clearActivity">Clear</button></div>
-          <div class="activity"><div id="activityLog" class="activity-log"></div></div>
+        <section class="panel glass activity-panel dashboard-detail hidden">
+          <details>
+            <summary><span><p class="eyebrow">ACTIVITY DETAILS</p><h3>Recent activity</h3></span><span class="summary-hint">Show log</span></summary>
+            <div class="activity"><div class="activity-actions"><p>Detailed updates from this browser session.</p><button class="text-btn" id="clearActivity">Clear</button></div><div id="activityLog" class="activity-log"></div></div>
+          </details>
         </section>
 
-        <section class="panel glass"><div class="panel-head"><div><p class="eyebrow">RECENTLY FOUND</p><h3>Movie cards</h3></div><button class="text-btn" data-go="movies">View all</button></div><div class="movie-grid" id="recentMovies"><div class="skeleton skeleton-card"></div><div class="skeleton skeleton-card"></div><div class="skeleton skeleton-card"></div></div></section>
+        <section class="panel glass dashboard-library-link"><div><p class="eyebrow">MOVIE LIBRARY</p><h3>Your collection is ready.</h3><p>Browse, search, and manage your movies in one focused library.</p></div><button class="btn primary" data-go="movies">Open movie library</button></section>
+        <div id="recentMovies" class="hidden" aria-hidden="true"></div>
       </section>
 
       <section id="view-movies" class="view">
         <section class="panel glass">
-          <div class="panel-head stack-mobile"><div><p class="eyebrow">CATALOGUE</p><h3 id="moviesTitle">Movies</h3></div><div class="toolbar"><input id="movieSearch" placeholder="Search title or channel" aria-label="Search movies by title or channel"><select id="movieStatusFilter" aria-label="Filter movies by status"><option value="ALL">All</option><option value="ACCEPTED">Accepted</option><option value="REJECTED">Rejected</option><option value="DOWNLOADED">Downloaded</option></select><button class="btn" id="refreshMovies">Refresh</button></div></div>
+          <div class="panel-head stack-mobile"><div><p class="eyebrow">MOVIE LIBRARY</p><h3 id="moviesTitle">My movies</h3><p class="muted" id="librarySummary">A focused view of your collection.</p></div><div class="toolbar"><input id="movieSearch" placeholder="Search your library" aria-label="Search movies by title or channel"><select id="movieSort" aria-label="Sort movies"><option value="newest">Newest added</option><option value="title">Title A–Z</option><option value="duration">Longest first</option></select><button class="btn" id="refreshMovies">Refresh</button></div></div>
+          <div class="library-tabs" role="tablist" aria-label="Movie library sections">
+            <button class="library-tab active" data-library-status="DOWNLOADED" role="tab">My library</button>
+            <button class="library-tab" data-library-status="ACCEPTED" role="tab">Ready</button>
+            <button class="library-tab" data-library-status="FAILED" role="tab">Needs attention</button>
+            <button class="library-tab" data-library-status="REJECTED" role="tab">Removed archive</button>
+          </div>
+          <select id="movieStatusFilter" class="hidden" aria-label="Filter movies by status"><option value="DOWNLOADED" selected>Downloaded</option><option value="ACCEPTED">Accepted</option><option value="FAILED">Failed</option><option value="REJECTED">Rejected</option><option value="ALL">All</option></select>
           <div class="bulk-bar glass" id="bulkBar">
             <div class="bulk-select-group">
-              <button class="btn" id="selectPageBtn">Select page</button>
-              <button class="btn" id="selectAllFilteredBtn">Select all filtered results</button>
-              <button class="btn" id="clearSelectionBtn">Clear selection</button>
-              <span class="bulk-count" id="bulkCount">0 movies selected</span>
+              <button class="btn" id="selectPageBtn">Select movies</button>
+              <button class="btn hidden" id="selectAllFilteredBtn">Select all results</button>
+              <button class="btn hidden" id="clearSelectionBtn">Clear selection</button>
+              <span class="bulk-count" id="bulkCount">Select movies to manage them</span>
             </div>
             <div class="bulk-action-group hidden" id="bulkActions">
               <button class="btn danger-ghost" id="bulkRemoveReplace">Remove &amp; Replace</button>
@@ -104,31 +116,44 @@
             </div>
           </div>
           <div class="movie-grid" id="allMovies"></div>
+          <div class="library-pagination"><button class="btn" id="moviesPrevBtn">Previous</button><span class="page-numbers" id="moviesPageNumbers"></span><span id="moviesPageInfo" class="sr-only">Page 1</span><button class="btn" id="moviesNextBtn">Next</button></div>
         </section>
       </section>
 
       <section id="view-downloads" class="view">
         <section class="panel glass">
-          <div class="panel-head stack-mobile"><div><p class="eyebrow">DOWNLOADS</p><h3>Download queue</h3></div><div class="toolbar"><button class="btn primary" id="downloadPrimaryBtn">Start downloads</button><button class="btn danger-ghost hidden" id="downloadStopBtn">Stop</button></div></div>
+          <div class="panel-head stack-mobile"><div><p class="eyebrow">DOWNLOADS</p><h3>Download queue</h3><p class="muted">Start, pause, and resolve anything that needs your attention.</p></div><div class="toolbar"><button class="btn primary" id="downloadPrimaryBtn">Start downloads</button><button class="btn" id="retryFailedBtn">Retry failed movies</button><button class="btn danger-ghost hidden" id="downloadStopBtn">Stop downloads</button></div></div>
           <div id="downloadsPageStateBanner" class="state-banner hidden" role="status"></div>
-          <div class="notice">Movie Manager downloads selected YouTube movies into your configured folder using yt-dlp and FFmpeg.</div>
+          <div class="notice">Movies are saved in your chosen download folder. Open a movie to see its file location or resolve an issue.</div>
+          <div class="download-tabs" role="tablist" aria-label="Download sections">
+            <button class="download-tab active" data-download-tab="downloading" role="tab">Downloading <span id="tabDownloadingCount">0</span></button>
+            <button class="download-tab" data-download-tab="queued" role="tab">Waiting <span id="tabQueuedCount">0</span></button>
+            <button class="download-tab" data-download-tab="failed" role="tab">Needs attention <span id="tabFailedCount">0</span></button>
+            <button class="download-tab" data-download-tab="completed" role="tab">Completed <span id="tabCompletedCount">0</span></button>
+          </div>
           <div class="download-groups">
-            <div>
+            <div class="download-group" data-download-group="downloading">
               <div class="download-group-head"><h4>Downloading now</h4><span class="download-group-count" id="dgDownloadingCount">0</span></div>
-              <div class="download-row-list" id="dgDownloading"></div>
+              <div class="download-card-grid" id="dgDownloading"></div>
             </div>
-            <div>
+            <div class="download-group" data-download-group="queued">
               <div class="download-group-head"><h4>Queued</h4><span class="download-group-count" id="dgQueuedCount">0</span></div>
-              <div class="download-row-list" id="dgQueued"></div>
+              <div class="download-card-grid" id="dgQueued"></div>
             </div>
-            <div>
+            <div class="download-group" data-download-group="completed">
               <div class="download-group-head"><h4>Completed</h4><span class="download-group-count" id="dgCompletedCount">0</span></div>
-              <div class="download-row-list" id="dgCompleted"></div>
+              <div class="download-card-grid" id="dgCompleted"></div>
             </div>
-            <div>
+            <div class="download-group" data-download-group="failed">
               <div class="download-group-head"><h4>Could not download</h4><span class="download-group-count" id="dgFailedCount">0</span></div>
-              <div class="download-row-list" id="dgFailed"></div>
+              <div class="download-card-grid" id="dgFailed"></div>
             </div>
+          </div>
+          <div class="library-pagination download-pagination" id="downloadPagination">
+            <button class="btn" id="downloadsPrevBtn">Previous</button>
+            <span class="page-numbers" id="downloadsPageNumbers"></span>
+            <span class="sr-only" id="downloadsPageInfo">Page 1</span>
+            <button class="btn" id="downloadsNextBtn">Next</button>
           </div>
         </section>
       </section>
@@ -145,21 +170,26 @@
           <div class="settings-section">
             <div class="settings-section-head"><h4>General</h4><p>Basic behaviour for how Movie Manager builds your catalogue.</p></div>
             <div class="setting-row"><div><strong>Minimum movie duration</strong><p>Movie Manager only keeps full-length movies (60+ minutes).</p></div><input id="minimumDuration" type="number" value="60" disabled aria-label="Minimum movie duration in minutes"></div>
+            <div class="setting-row"><div><strong>Movies per page</strong><p>Choose how many full movie cards you see before moving to the next page.</p></div><select id="moviesPerPage" aria-label="Movies per page"><option value="12">12 per page</option><option value="24">24 per page</option><option value="30">30 per page — recommended</option><option value="48">48 per page</option></select></div>
           </div>
 
           <div class="settings-section">
             <div class="settings-section-head"><h4>Downloads</h4><p>Where movies are saved and how many download at once.</p></div>
-            <div class="setting-row"><div><strong>Simultaneous downloads</strong><p>How many movies Movie Manager can download at the same time. A finished movie's slot is filled immediately by the next one.</p></div><select id="maxConcurrentDownloads" aria-label="Simultaneous downloads"><option value="1">1</option><option value="2">2</option><option value="3" selected>3</option><option value="4">4</option><option value="5">5</option><option value="6">6</option><option value="7">7</option></select></div>
+            <div class="setting-row"><div><strong>Download speed</strong><p>How many movies download at once. Seven is the recommended setting for this computer and connection.</p></div><select id="maxConcurrentDownloads" aria-label="Simultaneous downloads"><option value="1">1 at a time</option><option value="2">2 at a time</option><option value="3">3 at a time</option><option value="4">4 at a time</option><option value="5">5 at a time</option><option value="6">6 at a time</option><option value="7">7 at a time — recommended</option></select></div>
             <div class="setting-row"><div><strong>Download quality</strong><p>Prefer an MP4-compatible result, with automatic fallback when needed.</p></div><select id="downloadQuality"><option value="best">Best available</option><option value="1080" selected>Up to 1080p</option><option value="720">Up to 720p</option><option value="480">Up to 480p</option></select></div>
             <div class="setting-row"><div><strong>Minimum free disk space (GB)</strong><p>Downloads pause automatically -- without touching what's already saved -- when free space on the download drive falls below this.</p></div><input id="minFreeDiskGb" type="number" min="1" step="1" value="20" aria-label="Minimum free disk space in gigabytes"></div>
             <div class="setting-row vertical"><div><strong>Download folder</strong><p>Completed files are placed inside language folders such as Yoruba, Igbo and Hausa.</p></div><div class="path-row"><input id="downloadRoot" placeholder="C:\Movies\Movie Manager" aria-label="Download folder path"><button class="btn" id="chooseFolder">Choose folder</button></div></div>
           </div>
 
           <div class="settings-section">
-            <div class="settings-section-head"><h4>YouTube</h4><p>Your connection to YouTube for discovery and downloads.</p></div>
-            <div class="setting-row"><div><strong>YouTube connection</strong><p>Your private key stays inside the local <code>.env</code> file and is never shown here.</p></div><span class="status-pill" id="apiConfigured">CHECKING</span></div>
-            <div class="setting-row"><div><strong>Use signed-in browser session</strong><p>Lets downloads use your existing signed-in YouTube session from a local browser, to avoid "Sign in to confirm you're not a bot" blocks.</p></div><label class="switch"><input type="checkbox" id="youtubeUseBrowserSession" aria-label="Use signed-in browser session"><span></span></label></div>
-            <div class="setting-row"><div><strong>Browser</strong><p>Which browser's signed-in YouTube session to use.</p></div><select id="youtubeBrowser" aria-label="Browser for signed-in YouTube session"><option value="chrome">Chrome</option><option value="edge">Edge</option><option value="firefox">Firefox</option></select></div>
+            <div class="settings-section-head"><h4>YouTube connection</h4><p>Your current connection is ready for normal discovery and downloads.</p></div>
+            <div class="setting-row"><div><strong>Connection status</strong><p>Movie Manager is connected locally. You do not need to sign in to a browser for normal downloads.</p></div><span class="status-pill" id="apiConfigured">CHECKING</span></div>
+            <details class="settings-advanced">
+              <summary>Advanced YouTube connection options</summary>
+              <p>Only change these if you are asked to troubleshoot a specific YouTube issue.</p>
+              <div class="setting-row"><div><strong>Use signed-in browser session</strong><p>Use a local browser session if a particular video requires it.</p></div><label class="switch"><input type="checkbox" id="youtubeUseBrowserSession" aria-label="Use signed-in browser session"><span></span></label></div>
+              <div class="setting-row"><div><strong>Browser</strong><p>Choose the browser session to use.</p></div><select id="youtubeBrowser" aria-label="Browser for signed-in YouTube session"><option value="chrome">Chrome</option><option value="edge">Edge</option><option value="firefox">Firefox</option></select></div>
+            </details>
           </div>
 
           <div class="settings-section">

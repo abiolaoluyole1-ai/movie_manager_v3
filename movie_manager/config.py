@@ -20,6 +20,7 @@ DEFAULTS = {
     "target:yoruba": "30",
     "count_only_downloadable": "0",
     "max_concurrent_downloads": str(CONCURRENCY_DEFAULT),
+    "movies_per_page": "30",
     "min_free_disk_gb": str(MIN_FREE_DISK_GB_DEFAULT),
     "download_quality": "1080",
     "youtube_use_browser_session": "0",
@@ -47,9 +48,14 @@ YOUTUBE_BLOCKED_COOLDOWN_SECONDS = 300
 
 
 def is_youtube_blocked_error(exc):
-    """True for yt-dlp's 'confirm you're not a bot' access-denied error --
-    a YouTube-side anti-bot block, not a bug to retry rapidly around."""
-    return "not a bot" in str(exc).lower()
+    """True for a temporary YouTube protection response.
+
+    yt-dlp also reports this short-lived restriction as "The page needs to
+    be reloaded". That response must not be recorded as a permanent movie
+    failure, because retrying a batch of it immediately prolongs the block.
+    """
+    message = str(exc).lower()
+    return "not a bot" in message or "page needs to be reloaded" in message
 
 
 def clamp_concurrency(value):

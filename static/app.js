@@ -1,6 +1,6 @@
-const state={language:"yoruba",target:30,provider:"youtube",movies:[],runtime:null,counts:{},mode:"discover",selection:new Set(),downloadableOnly:false};
+const state={language:"yoruba",target:30,provider:"youtube",movies:[],downloadMovies:[],runtime:null,counts:{},mode:"discover",selection:new Set(),downloadableOnly:false,downloadTab:"downloading",moviesPage:0,moviesPageSize:24,moviesTotal:0,downloadPages:{downloading:0,queued:0,completed:0,failed:0}};
 const $=id=>document.getElementById(id);const els={};
-function cache(){["languageSelect","targetInput","modeSelect","primaryActionBtn","secondaryStopBtn","statTarget","statAccepted","statDownloadable","statDownloaded","statRemaining","statSourceMissing","statSourceInvalid","statFound","statRejected","discoveryStatus","downloadStatus","discoveryBar","discoveryProgressText","discoveryPercent","scannedCount","underCount","notMovieCount","wrongLanguageCount","duplicateCount","apiCount","retryCount","currentQuery","discoveryMessage","recentMovies","allMovies","activityLog","downloadSummary","movieSearch","movieStatusFilter","refreshMovies","downloadPrimaryBtn","downloadStopBtn","minimumDuration","maxConcurrentDownloads","minFreeDiskGb","downloadRoot","chooseFolder","saveSettings","settingsSaveStatus","apiConfigured","movieModal","modalBody","toastWrap","networkDot","networkText","clearActivity","moviesTitle","selectPageBtn","selectAllFilteredBtn","clearSelectionBtn","bulkCount","bulkActions","bulkRemoveReplace","bulkWrongLanguage","bulkRestore","clearLibraryBtn","startFreshBtn","dashboardStateBanner","downloadStateBanner","downloadsPageStateBanner","heroProgressTitle","heroProgressSub","heroProgressCount","heroProgressPct","heroProgressFill","heroStatusText","activeJobsGrid","dgDownloading","dgDownloadingCount","dgQueued","dgQueuedCount","dgCompleted","dgCompletedCount","dgFailed","dgFailedCount","bulkBar","dashActiveCount","dashQueuedCount","dashCompletedCount","dashFailedCount","dashDownloadPrimaryBtn","dashDownloadStopBtn","youtubeUseBrowserSession","youtubeBrowser"].forEach(id=>els[id]=$(id));}
+function cache(){["languageSelect","targetInput","modeSelect","primaryActionBtn","secondaryStopBtn","discoverySetup","statTarget","statAccepted","statDownloadable","statDownloaded","statRemaining","statSourceMissing","statSourceInvalid","statFound","statRejected","discoveryStatus","downloadStatus","discoveryBar","discoveryProgressText","discoveryPercent","scannedCount","underCount","notMovieCount","wrongLanguageCount","duplicateCount","apiCount","retryCount","currentQuery","discoveryMessage","recentMovies","allMovies","activityLog","downloadSummary","movieSearch","movieStatusFilter","movieSort","refreshMovies","moviesPrevBtn","moviesNextBtn","moviesPageInfo","moviesPageNumbers","librarySummary","downloadPrimaryBtn","downloadStopBtn","retryFailedBtn","minimumDuration","moviesPerPage","maxConcurrentDownloads","minFreeDiskGb","downloadRoot","chooseFolder","saveSettings","settingsSaveStatus","apiConfigured","movieModal","modalBody","toastWrap","networkDot","networkText","clearActivity","moviesTitle","selectPageBtn","selectAllFilteredBtn","clearSelectionBtn","bulkCount","bulkActions","bulkRemoveReplace","bulkWrongLanguage","bulkRestore","clearLibraryBtn","startFreshBtn","dashboardStateBanner","downloadStateBanner","downloadsPageStateBanner","sessionOutcome","heroProgressTitle","heroProgressSub","heroProgressCount","heroProgressPct","heroProgressFill","heroStatusText","activeJobsGrid","dgDownloading","dgDownloadingCount","dgQueued","dgQueuedCount","dgCompleted","dgCompletedCount","dgFailed","dgFailedCount","tabDownloadingCount","tabQueuedCount","tabCompletedCount","tabFailedCount","downloadsPrevBtn","downloadsNextBtn","downloadsPageNumbers","downloadsPageInfo","downloadPagination","bulkBar","dashActiveCount","dashQueuedCount","dashCompletedCount","dashFailedCount","dashDownloadPrimaryBtn","dashDownloadStopBtn","youtubeUseBrowserSession","youtubeBrowser"].forEach(id=>els[id]=$(id));}
 // New YouTube-only controls are intentionally kept outside the legacy cache list.
 els.downloadQuality=$("downloadQuality");els.bulkDownloadSelected=$("bulkDownloadSelected");
 async function api(url,options={}){const opts={headers:{"Content-Type":"application/json"},...options};const r=await fetch(url,opts);let b={};try{b=await r.json()}catch{}if(!r.ok||b.ok===false)throw new Error(b.error||`Request failed (${r.status})`);return b}
@@ -11,15 +11,15 @@ function fmtBytes(n){if(n==null)return"—";let v=Number(n),u=["B","KB","MB","GB
 function fmtTime(s){if(s==null||!isFinite(s))return"—";s=Math.max(0,Math.round(s));if(s<60)return`${s}s`;const m=Math.floor(s/60),x=s%60;if(m<60)return`${m}m ${x}s`;return`${Math.floor(m/60)}h ${m%60}m`}
 const PHASE_PRIORITY=["error","disk-low","waiting-network","running","paused","stopping","continue","completed","waiting-source","idle"];
 const DASHBOARD_PHASE_LABELS={
-  idle:{label:"Start",cls:"primary",disabled:false},
-  running:{label:"Pause",cls:"primary",disabled:false},
+  idle:{label:"Find movies",cls:"primary",disabled:false},
+  running:{label:"Pause finding",cls:"primary",disabled:false},
   "waiting-network":{label:"Waiting for internet…",cls:"",disabled:true},
   "disk-low":{label:"Low disk space",cls:"",disabled:true},
-  paused:{label:"Resume",cls:"primary",disabled:false},
+  paused:{label:"Resume finding",cls:"primary",disabled:false},
   stopping:{label:"Stopping…",cls:"",disabled:true},
   completed:{label:"✓ Completed",cls:"",disabled:true},
-  continue:{label:"Continue",cls:"primary",disabled:false},
-  error:{label:"Retry",cls:"primary",disabled:false},
+  continue:{label:"Find more movies",cls:"primary",disabled:false},
+  error:{label:"Try discovery again",cls:"primary",disabled:false},
   "waiting-source":{label:"No downloads queued",cls:"",disabled:true},
 };
 const DOWNLOAD_PHASE_LABELS={
@@ -77,6 +77,8 @@ function applyButtonPhase(btn,info){btn.textContent=info.label;btn.disabled=!!in
 function renderDashboardControls(){
   const phase=combineDashboardPhase(),info=DASHBOARD_PHASE_LABELS[phase]||DASHBOARD_PHASE_LABELS.idle;
   applyButtonPhase(els.primaryActionBtn,info);
+  if(phase==="completed")els.primaryActionBtn.textContent="Movies found";
+  if(els.discoverySetup)els.discoverySetup.classList.toggle("hidden",phase==="completed");
   const showStop=["running","waiting-network","disk-low","paused","stopping","waiting-source"].includes(phase);
   els.secondaryStopBtn.classList.toggle("hidden",!showStop);
   els.secondaryStopBtn.disabled=phase==="stopping";
@@ -206,9 +208,9 @@ function renderActiveJobs(jobs){
     </article>`;
   }).join("");
 }
-function downloadRowHtml(m,kind){
+function downloadCardHtml(m,kind){
   const thumb=m.thumbnail_url?`<img loading="lazy" src="${esc(m.thumbnail_url)}" alt="">`:"";
-  let sub="",bytes,total;
+  let sub="",bytes,total,speed,eta,pct=null;
   if(kind==="downloading"){
     // Live numbers come from the active job (kept fresh by download_progress/
     // download_stage), not the movie row -- that only reflects the last
@@ -216,26 +218,39 @@ function downloadRowHtml(m,kind){
     const j=m._job||{};
     bytes=j.bytes_downloaded!=null?j.bytes_downloaded:m.bytes_downloaded;
     total=j.total_bytes!=null?j.total_bytes:m.total_bytes;
-    const speed=j.speed_bps!=null?j.speed_bps:m.download_speed_bps;
-    const eta=j.eta_seconds!=null?j.eta_seconds:m.download_eta_seconds;
+    speed=j.speed_bps!=null?j.speed_bps:m.download_speed_bps;
+    eta=j.eta_seconds!=null?j.eta_seconds:m.download_eta_seconds;
     const stage=j.stage||m._stage||"DOWNLOADING";
-    const pct=total?Math.min(100,(bytes||0)/total*100):null;
+    pct=total?Math.min(100,(bytes||0)/total*100):null;
     sub=`${jobStageLabel(stage)}${pct!=null?` • ${pct.toFixed(0)}%`:""}${speed?` • ${fmtBytes(speed)}/s`:""}${eta!=null?` • ETA ${fmtTime(eta)}`:""}`;
   }else if(kind==="queued"){
     sub="Waiting for a free download slot";
   }else if(kind==="completed"){
-    sub=m.file_path?`Saved to ${m.file_path}`:"Completed";
+    sub="Ready to watch in your movie library";
   }else if(kind==="failed"){
     sub=m.download_error?`Could not download — ${m.download_error}`:"Could not download";
   }
-  return `<div class="download-row ${kind}" data-open="${m.id}">
-    <div class="download-row-thumb">${thumb}</div>
-    <div class="download-row-body">
-      <div class="download-row-title">${esc(m.title)}</div>
-      <div class="download-row-sub">${esc(sub)}</div>
-    </div>
-    <div class="download-row-stat">${kind==="downloading"&&total?`<strong>${fmtBytes(bytes)} / ${fmtBytes(total)}</strong>`:""}</div>
-  </div>`;
+  if(kind==="failed")sub=friendlyDownloadError(m.download_error);
+  const status=kind==="downloading"?(pct!=null?`Downloading ${pct.toFixed(0)}%`:"Downloading"):kind==="queued"?"Waiting":kind==="completed"?"Completed":"Needs attention";
+  const progress=kind==="downloading"?`<div class="download-card-progress"><i style="width:${pct||0}%"></i></div><div class="download-card-meta"><span>${total?`${fmtBytes(bytes)} / ${fmtBytes(total)}`:"Preparing file"}</span><span>${speed?`${fmtBytes(speed)}/s`:eta!=null?`ETA ${fmtTime(eta)}`:""}</span></div>`:"";
+  const action=kind==="failed"?"Resolve issue":kind==="completed"?"Open movie":"View details";
+  return `<article class="download-card ${kind}" data-open="${m.id}"><div class="download-card-thumb">${thumb}<span class="download-card-status">${status}</span></div><div class="download-card-body"><div class="download-card-title" title="${esc(m.title)}">${esc(m.title)}</div><div class="download-card-sub">${esc(sub)}</div>${progress}<button class="mini-btn download-card-action" data-open="${m.id}">${action}</button></div></article>`;
+}
+function friendlyDownloadError(error=""){
+  const message=String(error);
+  if(/private video/i.test(message))return"This video is private. Replace it with another movie.";
+  if(/temporarily (blocked|limited)|not a bot|page needs to be reloaded/i.test(message))return"YouTube needs a short break. Movie Manager will retry when it is safe.";
+  if(/sign in/i.test(message))return"YouTube needs extra access for this video. Open the movie for options.";
+  return message?"This movie could not download. Open it to retry or replace it.":"This movie could not download. Open it to resolve the issue.";
+}
+function setDownloadTab(tab){
+  state.downloadTab=tab;
+  state.downloadPages[tab]=0;
+  document.querySelectorAll("[data-download-tab]").forEach(b=>{const active=b.dataset.downloadTab===tab;b.classList.toggle("active",active);b.setAttribute("aria-selected",String(active))});
+  document.querySelectorAll("[data-download-group]").forEach(g=>g.classList.toggle("hidden",g.dataset.downloadGroup!==tab));
+}
+function renderDownloadPageNumbers(totalPages,current){
+  els.downloadsPageNumbers.innerHTML=Array.from({length:totalPages},(_,i)=>`<button class="page-number ${i===current?"active":""}" data-download-page="${i}" aria-label="Download page ${i+1}" ${i===current?"aria-current=\"page\"":""}>${i+1}</button>`).join("");
 }
 function renderDownloadsPage(rows){
   const activeJobs=state.runtime?.downloads?.active_jobs||[];
@@ -248,16 +263,27 @@ function renderDownloadsPage(rows){
     if(activeIds.has(id)){m._job=jobByMovie[id];m._stage=m._job&&m._job.stage;downloading.push(m)}
     else if(m.download_status==="DOWNLOADED")completed.push(m);
     else if(m.download_status==="FAILED")failed.push(m);
-    else if(["READY","WAITING_NETWORK","QUEUED"].includes(m.download_status)||m.downloadable)queued.push(m);
+    else if(["READY","WAITING_NETWORK","QUEUED"].includes(m.download_status))queued.push(m);
   });
   els.dgDownloadingCount.textContent=downloading.length;
   els.dgQueuedCount.textContent=queued.length;
   els.dgCompletedCount.textContent=completed.length;
   els.dgFailedCount.textContent=failed.length;
-  els.dgDownloading.innerHTML=downloading.length?downloading.map(m=>downloadRowHtml(m,"downloading")).join(""):emptyStateHtml("⬇️","Nothing downloading right now","Press Start downloads to begin.");
-  els.dgQueued.innerHTML=queued.length?queued.map(m=>downloadRowHtml(m,"queued")).join(""):emptyStateHtml("🕓","No downloads queued","Movies ready to download will appear here.");
-  els.dgCompleted.innerHTML=completed.length?completed.map(m=>downloadRowHtml(m,"completed")).join(""):emptyStateHtml("✅","No completed movies yet","Finished movies will appear here automatically.");
-  els.dgFailed.innerHTML=failed.length?failed.map(m=>downloadRowHtml(m,"failed")).join(""):emptyStateHtml("✔️","No failed downloads","Movie Manager will show anything it couldn't download here.");
+  els.tabDownloadingCount.textContent=downloading.length;
+  els.tabQueuedCount.textContent=queued.length;
+  els.tabCompletedCount.textContent=completed.length;
+  els.tabFailedCount.textContent=failed.length;
+  const groups={downloading,queued,completed,failed},active=groups[state.downloadTab]||[];
+  const pageSize=30,totalPages=Math.max(1,Math.ceil(active.length/pageSize));
+  if(state.downloadPages[state.downloadTab]>=totalPages)state.downloadPages[state.downloadTab]=totalPages-1;
+  const page=state.downloadPages[state.downloadTab],visible=active.slice(page*pageSize,page*pageSize+pageSize);
+  const renderGroup=(name,icon,title,body)=>{const list=groups[name],el=els[`dg${name[0].toUpperCase()+name.slice(1)}`];el.innerHTML=name===state.downloadTab?(list.length?visible.map(m=>downloadCardHtml(m,name)).join(""):emptyStateHtml(icon,title,body)):""};
+  renderGroup("downloading","⬇️","Nothing downloading right now","Press Start downloads to begin.");
+  renderGroup("queued","🕓","No downloads queued","Movies ready to download will appear here.");
+  renderGroup("completed","✅","No completed movies yet","Finished movies will appear here automatically.");
+  renderGroup("failed","✔️","No failed downloads","Movie Manager will show anything it couldn't download here.");
+  els.downloadPagination?.classList.toggle("hidden",active.length<=pageSize);
+  if(els.downloadsPrevBtn)els.downloadsPrevBtn.disabled=page===0;if(els.downloadsNextBtn)els.downloadsNextBtn.disabled=page>=totalPages-1;if(els.downloadsPageInfo)els.downloadsPageInfo.textContent=`Page ${page+1} of ${totalPages}`;if(els.downloadsPageNumbers)renderDownloadPageNumbers(totalPages,page);
 }
 function renderStats(rt){const target=Number(state.target||0),accepted=Number(state.counts.accepted||0),downloadable=Number(state.counts.downloadable||0),downloaded=Number(state.counts.downloaded||0),sourceMissing=Number(state.counts.source_missing||0),sourceInvalid=Number(state.counts.source_invalid||0),found=Number(state.counts.all||0),rejected=Number(state.counts.rejected||0),progress=state.downloadableOnly?downloadable:accepted,rem=Math.max(target-progress,0);els.statTarget.textContent=target.toLocaleString();els.statAccepted.textContent=accepted.toLocaleString();els.statDownloadable.textContent=downloadable.toLocaleString();els.statDownloaded.textContent=downloaded.toLocaleString();els.statRemaining.textContent=rem.toLocaleString();els.statSourceMissing.textContent=sourceMissing.toLocaleString();els.statSourceInvalid.textContent=sourceInvalid.toLocaleString();els.statFound.textContent=found.toLocaleString();els.statRejected.textContent=rejected.toLocaleString();const pct=target?Math.min(100,progress/target*100):0;els.discoveryBar.style.width=`${pct}%`;els.discoveryProgressText.textContent=`${progress.toLocaleString()} / ${target.toLocaleString()}`;els.discoveryPercent.textContent=`${pct.toFixed(1)}%`;const d=rt?.discovery||{},s=d.stats||{};applyStatusPill(els.discoveryStatus,d.status||"IDLE");els.scannedCount.textContent=Number(s.candidates_scanned||0).toLocaleString();els.underCount.textContent=Number(s.rejected_under_duration||0).toLocaleString();els.notMovieCount.textContent=Number(s.rejected_not_movie||0).toLocaleString();els.wrongLanguageCount.textContent=Number(s.rejected_wrong_language||0).toLocaleString();els.duplicateCount.textContent=Number(s.duplicates_skipped||0).toLocaleString();els.apiCount.textContent=Number(s.api_requests||0).toLocaleString();els.retryCount.textContent=Number(s.network_retries||0).toLocaleString();els.currentQuery.textContent=d.current_query||"Waiting to start";els.discoveryMessage.textContent=d.message||"Your progress is saved automatically.";const dl=rt?.downloads||{};applyStatusPill(els.downloadStatus,dl.status||"IDLE");const dc=state.counts.download||{};const activeJobs=dl.active_jobs||[];const dlWaiting=Number(dc.READY||0)+Number(dc.WAITING_NETWORK||0);els.dashActiveCount.textContent=activeJobs.length.toLocaleString();els.dashQueuedCount.textContent=dlWaiting.toLocaleString();els.dashCompletedCount.textContent=Number(dc.DOWNLOADED||0).toLocaleString();els.dashFailedCount.textContent=Number(dc.FAILED||0).toLocaleString();els.downloadSummary.textContent=activeJobs.length?`Downloading ${activeJobs.length} at once • ${dlWaiting.toLocaleString()} queued • ${Number(dc.DOWNLOADED||0).toLocaleString()} completed${dc.FAILED?` • ${dc.FAILED} could not download`:""}`:(dl.message||"No downloads running yet.");renderActiveJobs(activeJobs);
   // Dashboard "what's happening" progress statement -- one clear sentence
@@ -280,25 +306,32 @@ function renderStats(rt){const target=Number(state.target||0),accepted=Number(st
   const banner=bannerStatusFor(rt);
   renderStateBanner(els.dashboardStateBanner,banner.status,banner.message);
   renderStateBanner(els.downloadStateBanner,dl.status==="DISK_LOW"?"DISK_LOW":dl.network_wait?"WAITING_NETWORK":null);
-  renderDashboardControls();renderDownloadControls();renderDownloadsPage(state.movies);}
+  const completedCount=Number(dc.DOWNLOADED||0),failedCount=Number(dc.FAILED||0);
+  if(!activeJobs.length&&!dlWaiting&&completedCount){els.downloadSummary.textContent=`${completedCount.toLocaleString()} movies downloaded${failedCount?`; ${failedCount} need attention`:""}.`;}
+  if(els.sessionOutcome){
+    const show=discoveryComplete&&downloadsIdle&&completedCount>0;
+    els.sessionOutcome.classList.toggle("hidden",!show);
+    if(show)els.sessionOutcome.innerHTML=`<div><strong>Download session complete</strong><p>${completedCount.toLocaleString()} movies are ready in your download folder${failedCount?`. ${failedCount} need attention`:""}.</p></div><div class="session-outcome-actions"><button class="btn" data-go="downloads">View completed</button><button class="btn primary" data-new-discovery>Find more movies</button></div>`;
+  }
+  renderDashboardControls();renderDownloadControls();renderDownloadsPage(state.downloadMovies);}
 const PROVIDER_LABELS={internet_archive:"Internet Archive",youtube:"YouTube"};
 function providerLabel(m){return PROVIDER_LABELS[m.provider]||"YouTube"}
 function fileExtLabel(url){const m=/\.([a-z0-9]{2,4})(?:$|\?)/i.exec(url||"");return m?m[1].toUpperCase():""}
 function card(m,selectable){const n=document.createElement("article");n.className="movie-card";n.dataset.cardId=m.id;const st=m.status||"DISCOVERED";const checked=state.selection.has(Number(m.id));if(selectable&&checked)n.classList.add("selected");const checkbox=selectable?`<div class="card-select"><input type="checkbox" data-select="${m.id}" aria-label="Select ${esc(m.title)}" ${checked?"checked":""}></div>`:"";const quickDownload=m.download_status==="READY"?`<button class="mini-btn accent" data-quick-download="${m.id}">Download</button>`:"";const menuItems=(st==="REJECTED"?`<button class="menu-item" data-restore="${m.id}">Restore</button>`:`<button class="menu-item" data-reject="${m.id}">Remove &amp; Replace</button><button class="menu-item" data-reject-wrong-language="${m.id}">Wrong language</button>`)+`<button class="menu-item danger" data-delete="${m.id}">Delete from Library</button>`;n.innerHTML=`${checkbox}<div class="thumb-wrap" data-open="${m.id}">${m.thumbnail_url?`<img loading="lazy" src="${esc(m.thumbnail_url)}" alt="">`:""}<div class="play-badge"><span>▶</span></div><span class="duration-badge">${esc(m.duration_label||"")}</span></div><div class="movie-body"><h4 title="${esc(m.title)}">${esc(m.title)}</h4><div class="movie-meta">${esc(m.channel_title||"Unknown channel")}<br>${m.published_at?new Date(m.published_at).getFullYear():"Unknown year"} • ${esc(movieStatusLabel(st))}</div><div class="movie-actions"><button class="mini-btn" data-open="${m.id}">Details</button><button class="mini-btn" data-youtube="${esc(m.youtube_url)}">${esc(providerLabel(m))}</button>${quickDownload}<div class="card-menu"><button class="mini-btn" data-menu-toggle aria-haspopup="true" aria-expanded="false">More ⋯</button><div class="card-menu-list hidden">${menuItems}</div></div></div></div>`;return n}
 function renderGrid(c,ms,selectable,emptyIcon,emptyTitle,emptyBody){c.innerHTML="";if(!ms.length){c.innerHTML=emptyIcon?emptyStateHtml(emptyIcon,emptyTitle,emptyBody):`<div class="empty">No movies here yet.</div>`;return}ms.forEach(m=>c.appendChild(card(m,selectable)))}
 function closeCardMenus(){document.querySelectorAll(".card-menu-list:not(.hidden)").forEach(l=>{l.classList.add("hidden");const t=l.previousElementSibling;if(t)t.setAttribute("aria-expanded","false")})}
-async function loadMovies(){const status=els.movieStatusFilter?.value||"ALL",search=els.movieSearch?.value||"";const rows=await api(`/api/movies?language=${encodeURIComponent(state.language)}&status=${encodeURIComponent(status)}&search=${encodeURIComponent(search)}&limit=120`);state.movies=rows;renderGrid(els.allMovies,rows,true,"🎬","No movies yet","Start discovery to find movies for this language.");renderGrid(els.recentMovies,rows.filter(m=>m.status!=="REJECTED").slice(0,5),false,"🎬","No movies yet","Start discovery to find movies for this language.");renderDownloadsPage(rows);els.moviesTitle.textContent=`${state.language[0].toUpperCase()+state.language.slice(1)} Movies`;updateSelectionUI()}
-function currentSettingsValues(){return{download_root:els.downloadRoot.value,max_concurrent_downloads:els.maxConcurrentDownloads.value,min_free_disk_gb:els.minFreeDiskGb.value,download_quality:els.downloadQuality.value,youtube_use_browser_session:els.youtubeUseBrowserSession.checked?"1":"0",youtube_browser:els.youtubeBrowser.value}}
+async function loadMovies(){const status=els.movieStatusFilter?.value||"DOWNLOADED",search=els.movieSearch?.value||"",offset=state.moviesPage*state.moviesPageSize;const [rows,ids,downloadRows]=await Promise.all([api(`/api/movies?language=${encodeURIComponent(state.language)}&status=${encodeURIComponent(status)}&search=${encodeURIComponent(search)}&limit=${state.moviesPageSize}&offset=${offset}`),api(`/api/movies/ids?language=${encodeURIComponent(state.language)}&status=${encodeURIComponent(status)}&search=${encodeURIComponent(search)}`),api(`/api/movies?language=${encodeURIComponent(state.language)}&limit=500`)]);const sort=els.movieSort?.value||"newest";if(sort==="title")rows.sort((a,b)=>String(a.title).localeCompare(String(b.title)));if(sort==="duration")rows.sort((a,b)=>(b.duration_seconds||0)-(a.duration_seconds||0));state.movies=rows;state.downloadMovies=downloadRows;state.moviesTotal=(ids.ids||[]).length;const totalPages=Math.max(1,Math.ceil(state.moviesTotal/state.moviesPageSize));if(state.moviesPage>=totalPages){state.moviesPage=totalPages-1;return loadMovies()}renderGrid(els.allMovies,rows,true,"🎬","No movies here","Try another library section or search term.");renderGrid(els.recentMovies,downloadRows.filter(m=>m.status!=="REJECTED").slice(0,5),false,"🎬","No movies yet","Start discovery to find movies for this language.");renderDownloadsPage(downloadRows);const names={DOWNLOADED:"My library",ACCEPTED:"Ready to download",FAILED:"Needs attention",REJECTED:"Removed archive",ALL:"All movies"};els.moviesTitle.textContent=names[status]||"Movies";els.librarySummary.textContent=`${state.moviesTotal.toLocaleString()} movie${state.moviesTotal===1?"":"s"} • Page ${state.moviesPage+1} of ${totalPages}`;els.moviesPageInfo.textContent=`Page ${state.moviesPage+1} of ${totalPages}`;els.moviesPrevBtn.disabled=state.moviesPage===0;els.moviesNextBtn.disabled=state.moviesPage>=totalPages-1;updateSelectionUI()}
+function currentSettingsValues(){return{download_root:els.downloadRoot.value,max_concurrent_downloads:els.maxConcurrentDownloads.value,movies_per_page:els.moviesPerPage.value,min_free_disk_gb:els.minFreeDiskGb.value,download_quality:els.downloadQuality.value,youtube_use_browser_session:els.youtubeUseBrowserSession.checked?"1":"0",youtube_browser:els.youtubeBrowser.value}}
 let savedSettingsSnapshot={};
 function snapshotSettings(){savedSettingsSnapshot=currentSettingsValues();updateSettingsSaveUI()}
 function settingsDirty(){const cur=currentSettingsValues();return Object.keys(cur).some(k=>String(cur[k])!==String(savedSettingsSnapshot[k]))}
 function updateSettingsSaveUI(statusOverride){const dirty=settingsDirty();els.saveSettings.disabled=!dirty;if(statusOverride){els.settingsSaveStatus.textContent=statusOverride.text;els.settingsSaveStatus.className=`settings-save-status ${statusOverride.cls||""}`;return}els.settingsSaveStatus.textContent=dirty?"Unsaved changes":"";els.settingsSaveStatus.className="settings-save-status"}
-async function bootstrap(){const d=await api("/api/bootstrap");state.language=d.language;state.target=d.target;state.provider=d.provider||"youtube";state.counts=d.counts;state.runtime=d.runtime;state.downloadableOnly=d.settings.count_only_downloadable==="1";renderLanguages(d.languages);els.targetInput.value=state.target;els.downloadRoot.value=d.settings.download_root||"";els.maxConcurrentDownloads.value=d.settings.max_concurrent_downloads||"3";els.minFreeDiskGb.value=d.settings.min_free_disk_gb||"20";els.downloadQuality.value=d.settings.download_quality||"1080";els.youtubeUseBrowserSession.checked=d.settings.youtube_use_browser_session==="1";els.youtubeBrowser.value=d.settings.youtube_browser||"chrome";els.apiConfigured.textContent=d.api_configured?"Connected":"Not connected";renderStats(d.runtime);snapshotSettings();await loadMovies()}
+async function bootstrap(){const d=await api("/api/bootstrap");state.language=d.language;state.target=d.target;state.provider=d.provider||"youtube";state.counts=d.counts;state.runtime=d.runtime;state.downloadableOnly=d.settings.count_only_downloadable==="1";renderLanguages(d.languages);els.targetInput.value=state.target;els.downloadRoot.value=d.settings.download_root||"";els.maxConcurrentDownloads.value=d.settings.max_concurrent_downloads||"3";els.moviesPerPage.value=d.settings.movies_per_page||"30";state.moviesPageSize=Number(els.moviesPerPage.value);els.minFreeDiskGb.value=d.settings.min_free_disk_gb||"20";els.downloadQuality.value=d.settings.download_quality||"1080";els.youtubeUseBrowserSession.checked=d.settings.youtube_use_browser_session==="1";els.youtubeBrowser.value=d.settings.youtube_browser||"chrome";els.apiConfigured.textContent=d.api_configured?"Connected":"Not connected";renderStats(d.runtime);snapshotSettings();await loadMovies()}
 async function refresh(){try{const d=await api("/api/bootstrap");state.language=d.language;state.target=d.target;state.provider=d.provider||"youtube";state.counts=d.counts;state.runtime=d.runtime;state.downloadableOnly=d.settings.count_only_downloadable==="1";els.languageSelect.value=state.language;els.apiConfigured.textContent=d.api_configured?"Connected":"Not connected";renderStats(d.runtime)}catch{}}
 async function startAction(){const target=Math.max(1,Number(els.targetInput.value||30));state.target=target;state.mode=els.modeSelect.value;if(state.mode==="discover"||state.mode==="both"){await api("/api/discovery/start",{method:"POST",body:JSON.stringify({language:state.language,target,provider:"youtube"})});addLog(`Discovery started. Target: ${target}.`,"log-good")}if(state.mode==="download"||state.mode==="both"){await api("/api/downloads/start",{method:"POST",body:JSON.stringify({language:state.language})});addLog("Download worker started.","log-good")}await refresh()}
 async function downloadSelected(){const ids=[...state.selection];if(!ids.length)return toast("No movies selected.","error");const r=await api("/api/movies/bulk/download",{method:"POST",body:JSON.stringify({ids,language:state.language})});toast(`${r.queued} queued, ${r.already_downloaded} already downloaded, ${r.could_not_queue} could not be queued.`);clearSelection();await refresh();await loadMovies()}
 function toggleSelect(id,checked){id=Number(id);if(checked)state.selection.add(id);else state.selection.delete(id);updateSelectionUI()}
-function updateSelectionUI(){const n=state.selection.size;if(els.bulkCount)els.bulkCount.textContent=n===0?"Tap movies to select them":`${n.toLocaleString()} movie${n===1?"":"s"} selected`;if(els.bulkActions)els.bulkActions.classList.toggle("hidden",n===0);if(els.bulkBar)els.bulkBar.classList.toggle("has-selection",n>0);document.querySelectorAll("#allMovies .movie-card[data-card-id]").forEach(c=>{const id=Number(c.dataset.cardId),sel=state.selection.has(id);c.classList.toggle("selected",sel);const cb=c.querySelector("[data-select]");if(cb)cb.checked=sel});const filter=els.movieStatusFilter?.value||"ALL",showRestoreOnly=filter==="REJECTED";if(els.bulkRestore)els.bulkRestore.classList.toggle("hidden",!showRestoreOnly);if(els.bulkRemoveReplace)els.bulkRemoveReplace.classList.toggle("hidden",showRestoreOnly);if(els.bulkWrongLanguage)els.bulkWrongLanguage.classList.toggle("hidden",showRestoreOnly)}
+function updateSelectionUI(){const n=state.selection.size;if(els.bulkCount)els.bulkCount.textContent=n===0?"Select movies to manage them":`${n.toLocaleString()} movie${n===1?"":"s"} selected`;if(els.bulkActions)els.bulkActions.classList.toggle("hidden",n===0);if(els.bulkBar)els.bulkBar.classList.toggle("has-selection",n>0);els.selectAllFilteredBtn?.classList.toggle("hidden",n===0);els.clearSelectionBtn?.classList.toggle("hidden",n===0);document.querySelectorAll("#allMovies .movie-card[data-card-id]").forEach(c=>{const id=Number(c.dataset.cardId),sel=state.selection.has(id);c.classList.toggle("selected",sel);const cb=c.querySelector("[data-select]");if(cb)cb.checked=sel});const filter=els.movieStatusFilter?.value||"ALL",showRestoreOnly=filter==="REJECTED";if(els.bulkRestore)els.bulkRestore.classList.toggle("hidden",!showRestoreOnly);if(els.bulkRemoveReplace)els.bulkRemoveReplace.classList.toggle("hidden",showRestoreOnly);if(els.bulkWrongLanguage)els.bulkWrongLanguage.classList.toggle("hidden",showRestoreOnly)}
 function selectPage(){state.movies.forEach(m=>state.selection.add(Number(m.id)));updateSelectionUI()}
 function clearSelection(){state.selection.clear();updateSelectionUI()}
 async function selectAllFiltered(){const status=els.movieStatusFilter?.value||"ALL",search=els.movieSearch?.value||"";const r=await api(`/api/movies/ids?language=${encodeURIComponent(state.language)}&status=${encodeURIComponent(status)}&search=${encodeURIComponent(search)}`);(r.ids||[]).forEach(id=>state.selection.add(Number(id)));updateSelectionUI();toast(`${(r.ids||[]).length.toLocaleString()} movies selected.`)}
@@ -351,4 +384,34 @@ function logDownloadProgress(p){
 function events(){const es=new EventSource("/api/events");es.addEventListener("movie_processed",async e=>{const d=JSON.parse(e.data).payload,m=d.movie,res=d.result;const msg=res==="ACCEPTED"?`Accepted: ${m.title}`:res==="TARGET_REACHED"?`Target already reached, kept as pending: ${m.title}`:res==="UNDER_DURATION"?`Skipped under 60m: ${m.title}`:res==="WRONG_LANGUAGE"?`Skipped wrong language: ${m.title}`:res==="DUPLICATE"?`Duplicate skipped: ${m.title}`:`Rejected: ${m.title}`;addLog(msg,res==="ACCEPTED"?"log-good":"");await refresh();if(res==="ACCEPTED"||res==="TARGET_REACHED")await loadMovies()});es.addEventListener("source_resolved",async e=>{const p=JSON.parse(e.data).payload;if(p.source_status==="SOURCE_INVALID")addLog(`Source invalid for movie #${p.movie_id}: ${p.error||""}`,"log-bad");await refresh();await loadMovies()});es.addEventListener("sources_bulk_resolved",async e=>{const p=JSON.parse(e.data).payload;addLog(`Bulk source resolution: ${p.ready} ready, ${p.missing} missing, ${p.invalid} invalid.`,"log-good");await refresh();await loadMovies()});es.addEventListener("discovery_status",async e=>{const p=JSON.parse(e.data).payload;state.runtime=state.runtime||{};state.runtime.discovery=p;renderStats(state.runtime);if(["COMPLETED","ERROR","STOPPED"].includes(p.status)){addLog(`Discovery ${p.status.toLowerCase()}: ${p.message}`,p.status==="ERROR"?"log-bad":"");await refresh();await loadMovies()}});es.addEventListener("download_status",e=>{const p=JSON.parse(e.data).payload;state.runtime=state.runtime||{};state.runtime.downloads=p;renderStats(state.runtime);addLog(p.message||`Download status: ${p.status}`)});es.addEventListener("download_progress",e=>{const p=JSON.parse(e.data).payload;applyDownloadProgress(p);logDownloadProgress(p)});
 es.addEventListener("download_stage",e=>{const p=JSON.parse(e.data).payload;applyDownloadStage(p);if(p.stage==="MERGING")addLog("Combining video and audio...");else if(p.stage==="VERIFYING")addLog("Checking movie...")});
 es.addEventListener("download_complete",async e=>{const p=JSON.parse(e.data).payload;delete progressLogState[p.movie_id];addLog(`✓ ${movieTitleById(p.movie_id)} completed`,"log-good");toast("Movie download completed.");await refresh();await loadMovies()});es.addEventListener("network_wait",e=>{const p=JSON.parse(e.data).payload;addLog(`Network/source interruption. Auto retry in ${p.delay}s. ${p.error||""}`,"log-bad")});es.addEventListener("download_retry",async e=>{await refresh();await loadMovies()});es.addEventListener("error",async e=>{const p=JSON.parse(e.data).payload;const msg=p.blocked?`⚠ ${p.message}`:`${p.scope||"App"} error: ${p.message}`;addLog(msg,"log-bad");toast(p.message||"An error occurred.","error");if(p.scope==="download"){await refresh();await loadMovies()}})}
-document.addEventListener("DOMContentLoaded",async()=>{cache();els.bulkDownloadSelected?.addEventListener("click",()=>downloadSelected().catch(e=>toast(e.message,"error")));bind();bindResetControls();network();events();try{await bootstrap();setInterval(refresh,5000)}catch(e){toast(e.message,"error")}});
+function bindExperienceImprovements(){
+  document.querySelectorAll("[data-download-tab]").forEach(button=>button.addEventListener("click",()=>setDownloadTab(button.dataset.downloadTab)));
+  els.downloadsPrevBtn?.addEventListener("click",()=>{state.downloadPages[state.downloadTab]=Math.max(0,state.downloadPages[state.downloadTab]-1);renderDownloadsPage(state.downloadMovies)});
+  els.downloadsNextBtn?.addEventListener("click",()=>{state.downloadPages[state.downloadTab]++;renderDownloadsPage(state.downloadMovies)});
+  els.retryFailedBtn?.addEventListener("click",async()=>{try{const r=await api("/api/downloads/retry-failed",{method:"POST",body:JSON.stringify({language:state.language})});toast(r.retried?"One failed movie was queued for another safe attempt.":"There are no failed movies to retry.");await refresh();await loadMovies()}catch(e){toast(e.message,"error")}});
+  document.body.addEventListener("click",async e=>{
+    const fresh=e.target.closest("[data-new-discovery]"),replace=e.target.closest("[data-replace-movie]"),go=e.target.closest("[data-go]");
+    if(go){document.querySelector(`.nav-item[data-view="${go.dataset.go}"]`)?.click();return;}
+    if(fresh){state.mode="discover";els.modeSelect.value="discover";els.targetInput.value=Number(state.counts.accepted||0)+30;els.discoverySetup?.classList.remove("hidden");renderDashboardControls();els.targetInput.focus();window.scrollTo({top:0,behavior:"smooth"});}
+    if(replace){const id=replace.dataset.replaceMovie;if(!confirm("Remove this unavailable movie and look for a replacement?"))return;try{await api(`/api/movies/${id}/reject`,{method:"POST",body:JSON.stringify({reason:"USER_REJECTED"})});toast("Movie removed. A replacement can now be found.");closeModal();await loadMovies();await refresh()}catch(err){toast(err.message,"error")}}
+  });
+  document.querySelectorAll("[data-library-status]").forEach(button=>button.addEventListener("click",()=>{state.moviesPage=0;els.movieStatusFilter.value=button.dataset.libraryStatus;document.querySelectorAll("[data-library-status]").forEach(tab=>{const active=tab===button;tab.classList.toggle("active",active);tab.setAttribute("aria-selected",String(active))});clearSelection();loadMovies().catch(e=>toast(e.message,"error"));}));
+  els.moviesPrevBtn?.addEventListener("click",()=>{if(state.moviesPage>0){state.moviesPage--;clearSelection();loadMovies().catch(e=>toast(e.message,"error"))}});
+  els.moviesNextBtn?.addEventListener("click",()=>{state.moviesPage++;clearSelection();loadMovies().catch(e=>toast(e.message,"error"))});
+  els.movieSort?.addEventListener("change",()=>{state.moviesPage=0;loadMovies().catch(e=>toast(e.message,"error"))});
+  els.moviesPerPage?.addEventListener("change",()=>{state.moviesPageSize=Number(els.moviesPerPage.value);state.moviesPage=0;updateSettingsSaveUI();loadMovies().catch(e=>toast(e.message,"error"))});
+  els.maxConcurrentDownloads?.addEventListener("change",async()=>{
+    const running=["RUNNING","PAUSED","WAITING","DISK_LOW"].includes(state.runtime?.downloads?.status);
+    if(!running)return;
+    try{const r=await api("/api/settings",{method:"POST",body:JSON.stringify({max_concurrent_downloads:els.maxConcurrentDownloads.value})});els.maxConcurrentDownloads.value=r.settings.max_concurrent_downloads;savedSettingsSnapshot.max_concurrent_downloads=els.maxConcurrentDownloads.value;updateSettingsSaveUI({text:"Download speed updated immediately",cls:"ok"});toast(`Now downloading up to ${els.maxConcurrentDownloads.value} movies at once.`);await refresh()}catch(e){toast(e.message,"error")}
+  });
+  document.body.addEventListener("click",e=>{const page=e.target.closest("[data-movies-page]"),downloadPage=e.target.closest("[data-download-page]");if(downloadPage){state.downloadPages[state.downloadTab]=Number(downloadPage.dataset.downloadPage);renderDownloadsPage(state.downloadMovies);return}if(page){state.moviesPage=Number(page.dataset.moviesPage);clearSelection();loadMovies().catch(err=>toast(err.message,"error"));}});
+}
+function renderPageNumbers(){
+  if(!els.moviesPageNumbers)return;
+  const total=Math.max(1,Math.ceil(state.moviesTotal/state.moviesPageSize)),current=state.moviesPage;
+  const pages=total<=7?[...Array(total).keys()]:[0,...new Set([Math.max(1,current-1),current,Math.min(total-2,current+1)]),total-1];
+  els.moviesPageNumbers.innerHTML=pages.map((page,index)=>`${index&&page>pages[index-1]+1?'<span>…</span>':""}<button class="page-number ${page===current?"active":""}" data-movies-page="${page}" ${page===current?'aria-current="page"':""}>${page+1}</button>`).join("");
+}
+document.addEventListener("DOMContentLoaded",()=>setInterval(renderPageNumbers,500));
+document.addEventListener("DOMContentLoaded",async()=>{cache();els.bulkDownloadSelected?.addEventListener("click",()=>downloadSelected().catch(e=>toast(e.message,"error")));bind();bindResetControls();bindExperienceImprovements();network();events();try{await bootstrap();const active=state.runtime?.downloads?.active_jobs?.length||0,failed=state.movies.some(m=>m.download_status==="FAILED"),waiting=state.movies.some(m=>["READY","QUEUED","WAITING_NETWORK"].includes(m.download_status)),completed=state.movies.some(m=>m.download_status==="DOWNLOADED");setDownloadTab(active?"downloading":failed?"failed":waiting?"queued":completed?"completed":"downloading");setInterval(refresh,5000)}catch(e){toast(e.message,"error")}});

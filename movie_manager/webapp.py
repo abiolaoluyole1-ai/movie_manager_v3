@@ -15,7 +15,7 @@ from .db import (
     bulk_restore_movies, count_downloadable, count_movies, counts, get_movie,
     get_setting, init_db, list_movie_ids, list_movies, list_movies_for_source_resolution,
     clear_movie_library, delete_movie_from_library, reject_movie, reset_search_state, restore_movie,
-    retry_download, set_download_source, set_setting, source_status_counts, queue_movies_for_download,
+    retry_download, retry_failed_downloads, set_download_source, set_setting, source_status_counts, queue_movies_for_download,
     start_fresh,
 )
 from .discovery import DISCOVERY_PROVIDERS
@@ -35,7 +35,9 @@ SOURCE_RESOLVE_WORKERS = 8
 def _serialise_movie(movie):
     movie = dict(movie)
     movie["duration_label"] = format_duration(movie.get("duration_seconds", 0))
-    movie["downloadable"] = bool(movie.get("download_url"))
+    movie["downloadable"] = bool(movie.get("download_url")) or (
+        movie.get("download_backend") == "YTDLP" and movie.get("provider") == "youtube"
+    )
     return movie
 
 
@@ -126,7 +128,10 @@ def create_app():
         language = request.args.get("language") or get_setting("active_language", "yoruba")
         status = request.args.get("status", "ALL")
         search = request.args.get("search", "")
-        limit = min(200, max(1, int(request.args.get("limit", 60))))
+        # The catalogue and completed-download view share this endpoint.  A
+        # larger safe cap lets a finished session show its whole result rather
+        # than making the completion total disagree with the visible list.
+        limit = min(500, max(1, int(request.args.get("limit", 60))))
         offset = max(0, int(request.args.get("offset", 0)))
         rows = list_movies(language, status=status, search=search, limit=limit, offset=offset)
         return jsonify([_serialise_movie(m) for m in rows])
@@ -396,6 +401,15 @@ def create_app():
         events.emit("download_retry", {"movie_id": movie_id})
         return jsonify({"ok": True})
 
+    @app.post("/api/downloads/retry-failed")
+    def downloads_retry_failed():
+        data = request.get_json(silent=True) or {}
+        language = data.get("language") or get_setting("active_language", "yoruba")
+        retried = retry_failed_downloads(language)
+        runtime.download.start(language, concurrency=clamp_concurrency(get_setting("max_concurrent_downloads", "3")))
+        events.emit("downloads_retried", {"language": language, "retried": retried})
+        return jsonify({"ok": True, "retried": retried})
+
     @app.get("/api/movies/<int:movie_id>/local-media")
     def movie_local_media(movie_id):
         movie = get_movie(movie_id)
@@ -454,7 +468,7 @@ def create_app():
         data = request.get_json(force=True)
         allowed = {
             "active_language", "maintain_target", "download_root", "count_only_downloadable",
-            "max_concurrent_downloads", "min_free_disk_gb", "download_quality",
+            "max_concurrent_downloads", "movies_per_page", "min_free_disk_gb", "download_quality",
             "youtube_use_browser_session", "youtube_browser",
         }
         for key, value in data.items():
@@ -463,6 +477,9 @@ def create_app():
                     Path(str(value)).expanduser().mkdir(parents=True, exist_ok=True)
                 elif key == "max_concurrent_downloads":
                     value = clamp_concurrency(value)
+                    runtime.download.set_concurrency(value)
+                elif key == "movies_per_page":
+                    value = str(value) if str(value) in {"12", "24", "30", "48"} else "30"
                 elif key == "min_free_disk_gb":
                     value = clamp_min_free_disk_gb(value)
                 elif key == "download_quality":

@@ -7,10 +7,11 @@ import requests
 
 from .config import (
     CONCURRENCY_DEFAULT, CONCURRENCY_MAX, CONCURRENCY_MIN,
-    MIN_FREE_DISK_GB_DEFAULT, NETWORK_RETRY_SECONDS, YOUTUBE_BLOCKED_MESSAGE,
+    MIN_FREE_DISK_GB_DEFAULT, NETWORK_RETRY_SECONDS, YOUTUBE_BLOCKED_COOLDOWN_SECONDS,
+    YOUTUBE_BLOCKED_MESSAGE,
     clamp_min_free_disk_gb, clamp_youtube_browser, is_youtube_blocked_error,
 )
-from .db import get_setting, next_download_ready, update_download
+from .db import get_setting, next_download_ready, set_setting, update_download
 from .events import events
 from .utils import extension_from_url, free_disk_space_gb, safe_filename, is_http_url
 
@@ -58,6 +59,7 @@ class YtDlpDownloadBackend:
                 self.controller._update_job(movie, worker_id, stage="MERGING")
 
         quality = get_setting("download_quality", "1080")
+        node_path = shutil.which("node")
         options = {
             "format": self._format(quality), "outtmpl": str(final.with_suffix(".%(ext)s")),
             "paths": {"home": str(final.parent), "temp": str(final.parent)}, "noplaylist": True,
@@ -65,12 +67,24 @@ class YtDlpDownloadBackend:
             "ffmpeg_location": shutil.which("ffmpeg"), "progress_hooks": [hook], "quiet": True,
             "no_warnings": True, "retries": 3, "fragment_retries": 3,
         }
+        if node_path:
+            # yt-dlp only enables Deno by default.  Node is already installed
+            # on this Windows machine and is needed to complete YouTube's JS
+            # challenge with the installed yt-dlp-ejs component.
+            options["js_runtimes"] = {"node": {"path": node_path}}
         browser = None
         if get_setting("youtube_use_browser_session", "0") == "1":
             browser = clamp_youtube_browser(get_setting("youtube_browser", "chrome"))
             # Reads that browser's own local cookie store at runtime (yt-dlp's
             # --cookies-from-browser) -- nothing is copied, exported or logged.
             options["cookiesfrombrowser"] = (browser,)
+            # yt-dlp's logged-in ``tv_downgraded`` client currently returns
+            # YouTube's misleading "page needs to be reloaded" response for
+            # some accounts. The yt-dlp maintainers recommend this compatible
+            # signed-in client pair instead.
+            options["extractor_args"] = {
+                "youtube": {"player_client": ["default", "web_embedded"]},
+            }
         self.controller._update_job(movie, worker_id, stage="PREPARING")
         update_download(movie["id"], download_status="DOWNLOADING", file_path=str(part), download_error=None)
         with yt_dlp.YoutubeDL(options) as ydl:
@@ -104,7 +118,7 @@ DISK_CHECK_WAIT_SECONDS = 10
 
 
 class DownloadController:
-    """Downloader for authorised/direct HTTP(S) movie-file sources.
+    """Downloader for YouTube and authorised/direct HTTP(S) movie-file sources.
 
     Runs `concurrency` worker threads (1-7, default 3). Each worker
     independently claims one movie at a time via next_download_ready()'s
@@ -126,6 +140,7 @@ class DownloadController:
         self.message = ""
         self.network_wait = False
         self.disk_low = False
+        self._youtube_blocked_until = 0.0
         self.active = {}
 
     def snapshot(self):
@@ -141,6 +156,7 @@ class DownloadController:
                 "message": self.message,
                 "network_wait": self.network_wait,
                 "disk_low": self.disk_low,
+                "youtube_cooldown_seconds": max(0, int(self._youtube_blocked_until - time.monotonic())),
             }
 
     def start(self, language="yoruba", concurrency=None):
@@ -150,6 +166,7 @@ class DownloadController:
             concurrency = max(CONCURRENCY_MIN, min(CONCURRENCY_MAX, int(concurrency)))
 
             if any(w.is_alive() for w in self._workers):
+                self.set_concurrency(concurrency)
                 if self.status == "PAUSED":
                     self._pause.clear()
                     self.status = "RUNNING"
@@ -158,6 +175,14 @@ class DownloadController:
 
             self.language = language
             self.concurrency = concurrency
+            try:
+                saved_cooldown = float(get_setting("youtube_blocked_until", "0"))
+            except (TypeError, ValueError):
+                saved_cooldown = 0
+            self._youtube_blocked_until = max(
+                self._youtube_blocked_until,
+                time.monotonic() + max(0, saved_cooldown - time.time()),
+            )
             self._stop.clear()
             self._pause.clear()
             self.status = "RUNNING"
@@ -165,10 +190,12 @@ class DownloadController:
             self.network_wait = False
             self.disk_low = False
             self.active = {}
-            self._workers = [
-                threading.Thread(target=self._run, args=(worker_id,), daemon=True)
-                for worker_id in range(concurrency)
-            ]
+            self._workers = []
+            for worker_id in range(concurrency):
+                worker = threading.Thread(target=self._run, args=(worker_id,), daemon=True,
+                                          name=f"movie-download-{worker_id}")
+                worker.movie_manager_worker_id = worker_id
+                self._workers.append(worker)
         for worker in self._workers:
             worker.start()
         events.emit("download_status", self.snapshot())
@@ -199,6 +226,64 @@ class DownloadController:
     def _wait_if_paused(self):
         while self._pause.is_set() and not self._stop.is_set():
             time.sleep(0.25)
+
+    def _wait_for_youtube_cooldown(self):
+        """Pause all workers after YouTube rate-limits one of them.
+
+        The restriction applies to the session/IP rather than a particular
+        video.  A shared cooldown prevents the next queued title from
+        immediately receiving the same block.
+        """
+        with self._lock:
+            remaining = self._youtube_blocked_until - time.monotonic()
+            if remaining <= 0:
+                return False
+            self.status = "WAITING"
+            self.message = f"YouTube temporarily limited requests. Retrying in about {int(remaining) + 1}s."
+        for _ in range(min(4, max(1, int(remaining * 4)))):
+            if self._stop.is_set():
+                return True
+            self._wait_if_paused()
+            time.sleep(0.25)
+        return True
+
+    def _start_youtube_cooldown(self):
+        with self._lock:
+            remaining = YOUTUBE_BLOCKED_COOLDOWN_SECONDS
+            self._youtube_blocked_until = max(self._youtube_blocked_until, time.monotonic() + remaining)
+            saved_until = time.time() + remaining
+        set_setting("youtube_blocked_until", str(saved_until))
+        events.emit("download_status", self.snapshot())
+
+    def set_concurrency(self, concurrency):
+        """Adjust active worker capacity without interrupting transfers.
+
+        Increasing starts extra workers immediately. Reducing lets excess
+        workers finish their current movie and then retire before claiming
+        another one, so no partial download is cancelled.
+        """
+        target = max(CONCURRENCY_MIN, min(CONCURRENCY_MAX, int(concurrency)))
+        new_workers = []
+        with self._lock:
+            self.concurrency = target
+            if self._stop.is_set() or not any(w.is_alive() for w in self._workers):
+                return
+            live_ids = {
+                getattr(worker, "movie_manager_worker_id", None)
+                for worker in self._workers if worker.is_alive()
+            }
+            for worker_id in range(target):
+                if worker_id not in live_ids:
+                    worker = threading.Thread(target=self._run, args=(worker_id,), daemon=True,
+                                              name=f"movie-download-{worker_id}")
+                    worker.movie_manager_worker_id = worker_id
+                    self._workers.append(worker)
+                    new_workers.append(worker)
+            self.message = (f"Download speed set to {target} at a time. "
+                            "Active downloads will adjust safely.")
+        for worker in new_workers:
+            worker.start()
+        events.emit("download_status", self.snapshot())
 
     def _output_paths(self, movie):
         root = Path(get_setting("download_root"))
@@ -394,6 +479,7 @@ class DownloadController:
                 update_download(movie["id"], download_status="READY", status="ACCEPTED")
                 return
             if is_youtube_blocked_error(exc):
+                self._start_youtube_cooldown()
                 update_download(movie["id"], download_status="FAILED", status="ACCEPTED",
                                  download_error=YOUTUBE_BLOCKED_MESSAGE)
                 events.emit("error", {"scope": "download", "movie_id": movie["id"],
@@ -416,7 +502,14 @@ class DownloadController:
     def _run(self, worker_id=0):
         try:
             while not self._stop.is_set():
+                # When capacity is reduced, finish the current movie first,
+                # then retire this surplus worker before it claims another.
+                with self._lock:
+                    if worker_id >= self.concurrency:
+                        break
                 self._wait_if_paused()
+                if self._wait_for_youtube_cooldown():
+                    continue
 
                 if not self._disk_guard_ok():
                     self._enter_disk_low()
@@ -440,7 +533,7 @@ class DownloadController:
                     with self._lock:
                         if not self.active and not self._pause.is_set() and not self._stop.is_set():
                             self.status = "WAITING"
-                            self.message = "Waiting for an authorised local-file download source..."
+                            self.message = "Waiting for queued YouTube or direct-file downloads..."
                     events.emit("download_status", self.snapshot())
                     for _ in range(IDLE_POLL_SECONDS * 4):
                         if self._stop.is_set():

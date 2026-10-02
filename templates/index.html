@@ -53,6 +53,12 @@
 
         <div id="sessionOutcome" class="session-outcome hidden" aria-live="polite"></div>
 
+        <section class="panel glass live-log-panel" aria-label="Live log">
+          <div class="panel-head"><div><p class="eyebrow">LIVE LOG</p><h3>What Movie Manager is doing</h3></div><button class="text-btn" id="clearActivity">Clear</button></div>
+          <div class="log-diagnostics" id="logDiagnostics"></div>
+          <div id="activityLog" class="activity-log" role="log" aria-live="polite" aria-label="Live activity log"></div>
+        </section>
+
         <div class="grid-two dash-second-row dashboard-detail hidden">
           <section class="panel glass">
             <div class="panel-head"><div><p class="eyebrow">DISCOVERY</p><h3>Live progress</h3></div><span class="status-pill" id="discoveryStatus">IDLE</span></div>
@@ -81,12 +87,7 @@
           </section>
         </div>
 
-        <section class="panel glass activity-panel dashboard-detail hidden">
-          <details>
-            <summary><span><p class="eyebrow">ACTIVITY DETAILS</p><h3>Recent activity</h3></span><span class="summary-hint">Show log</span></summary>
-            <div class="activity"><div class="activity-actions"><p>Detailed updates from this browser session.</p><button class="text-btn" id="clearActivity">Clear</button></div><div id="activityLog" class="activity-log"></div></div>
-          </details>
-        </section>
+
 
         <section class="panel glass dashboard-library-link"><div><p class="eyebrow">MOVIE LIBRARY</p><h3>Your collection is ready.</h3><p>Browse, search, and manage your movies in one focused library.</p></div><button class="btn primary" data-go="movies">Open movie library</button></section>
         <div id="recentMovies" class="hidden" aria-hidden="true"></div>

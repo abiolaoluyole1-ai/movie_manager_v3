@@ -9,8 +9,10 @@ from waitress import serve
 load_dotenv()
 
 from movie_manager.db import reset_interrupted_downloads  # noqa: E402
+from movie_manager.logging_setup import setup_logging  # noqa: E402
 from movie_manager.webapp import create_app  # noqa: E402
 
+setup_logging()
 app = create_app()
 reset_interrupted_downloads()
 

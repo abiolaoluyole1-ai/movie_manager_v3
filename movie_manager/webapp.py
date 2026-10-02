@@ -13,14 +13,14 @@ from .config import (
 from .db import (
     all_settings, all_video_ids, apply_source_resolution, bulk_reject_movies,
     bulk_restore_movies, count_downloadable, count_movies, counts, get_movie,
-    get_setting, init_db, list_movie_ids, list_movies, list_movies_for_source_resolution,
+    get_language_target, get_setting, init_db, list_movie_ids, list_movies, list_movies_for_source_resolution,
     clear_movie_library, delete_movie_from_library, reject_movie, reset_search_state, restore_movie,
     retry_download, retry_failed_downloads, set_download_source, set_setting, source_status_counts, queue_movies_for_download,
     start_fresh,
 )
 from .discovery import DISCOVERY_PROVIDERS
-from .events import events
-from .language_profiles import PROFILES
+from .events import activity, events
+from .language_profiles import PROFILES, public_languages
 from .runtime import runtime
 from .source_adapters import resolver
 from .source_mappings import import_mapping_entries, parse_csv_mapping, parse_json_mapping
@@ -63,7 +63,7 @@ def _maybe_start_replacement_discovery(language):
     maintain = get_setting("maintain_target", "1") == "1"
     if not maintain:
         return False
-    target = int(get_setting(f"target:{language}", "30"))
+    target = get_language_target(language)
     provider = "youtube"
     accepted = count_movies(language, ACCEPTED)
     if accepted < target and runtime.discovery.snapshot()["status"] not in {"RUNNING", "PAUSED"}:
@@ -73,6 +73,15 @@ def _maybe_start_replacement_discovery(language):
         except Exception:
             return False
     return False
+
+
+def _start_downloads(language):
+    """Start the download workers; (True, None) or (False, reason)."""
+    try:
+        runtime.download.start(language, concurrency=clamp_concurrency(get_setting("max_concurrent_downloads", "3")))
+    except RuntimeError as exc:
+        return False, str(exc)
+    return True, None
 
 
 def _workers_active():
@@ -94,7 +103,7 @@ def create_app():
     def bootstrap():
         language = get_setting("active_language", "yoruba")
         runtime.restore_discovery(language)
-        target = int(get_setting(f"target:{language}", "30"))
+        target = get_language_target(language)
         provider = "youtube"
         status_counts, download_counts = counts(language)
         src_counts = source_status_counts(language, ACCEPTED)
@@ -106,7 +115,7 @@ def create_app():
             "provider": provider,
             "providers": ["youtube"],
             "settings": all_settings(),
-            "languages": PROFILES,
+            "languages": public_languages(),
             "api_configured": bool(key and key != "PASTE_YOUR_PRIVATE_KEY_HERE"),
             "counts": {
                 "accepted": sum(status_counts.get(x, 0) for x in ACCEPTED),
@@ -160,7 +169,9 @@ def create_app():
             # In combined mode start the existing worker pool first, then let
             # discovery continuously feed its atomic queue.
             if data.get("mode") == "both":
-                runtime.download.start(language, concurrency=clamp_concurrency(get_setting("max_concurrent_downloads", "3")))
+                started, reason = _start_downloads(language)
+                if not started:
+                    return jsonify({"ok": False, "error": reason}), 400
             runtime.start_discovery(language, target, provider=provider)
         except Exception as exc:
             return jsonify({"ok": False, "error": str(exc)}), 400
@@ -292,7 +303,9 @@ def create_app():
             return jsonify({"ok": False, "error": "ids must be a list of movie IDs."}), 400
         language = data.get("language") or get_setting("active_language", "yoruba")
         result = queue_movies_for_download(language, ids)
-        runtime.download.start(language, concurrency=clamp_concurrency(get_setting("max_concurrent_downloads", "3")))
+        started, reason = _start_downloads(language)
+        if not started:
+            return jsonify({"ok": False, "error": reason, **result}), 409
         result["ok"] = True
         events.emit("downloads_queued", {"language": language, **result})
         return jsonify(result)
@@ -406,7 +419,9 @@ def create_app():
         data = request.get_json(silent=True) or {}
         language = data.get("language") or get_setting("active_language", "yoruba")
         retried = retry_failed_downloads(language)
-        runtime.download.start(language, concurrency=clamp_concurrency(get_setting("max_concurrent_downloads", "3")))
+        started, reason = _start_downloads(language)
+        if not started:
+            return jsonify({"ok": False, "error": reason}), 409
         events.emit("downloads_retried", {"language": language, "retried": retried})
         return jsonify({"ok": True, "retried": retried})
 
@@ -432,8 +447,9 @@ def create_app():
         language = (request.get_json(silent=True) or {}).get(
             "language", get_setting("active_language", "yoruba")
         )
-        concurrency = clamp_concurrency(get_setting("max_concurrent_downloads"))
-        runtime.download.start(language, concurrency=concurrency)
+        started, reason = _start_downloads(language)
+        if not started:
+            return jsonify({"ok": False, "error": reason}), 409
         return jsonify({"ok": True})
 
     @app.post("/api/downloads/pause")
@@ -471,6 +487,9 @@ def create_app():
             "max_concurrent_downloads", "movies_per_page", "min_free_disk_gb", "download_quality",
             "youtube_use_browser_session", "youtube_browser",
         }
+        language = data.get("active_language")
+        if language is not None and not (PROFILES.get(language) or {}).get("enabled"):
+            return jsonify({"ok": False, "error": "That language profile is not enabled."}), 400
         for key, value in data.items():
             if key in allowed:
                 if key == "download_root":
@@ -529,6 +548,22 @@ def create_app():
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
         })
+
+    @app.get("/api/log")
+    def activity_log():
+        """Recent Live Log lines, so a reloaded page or a late-opened tab can catch up."""
+        try:
+            after = max(0, int(request.args.get("after", 0)))
+            limit = min(500, max(1, int(request.args.get("limit", 300))))
+        except ValueError:
+            return jsonify({"ok": False, "error": "after and limit must be numbers."}), 400
+        language = request.args.get("language") or None
+        return jsonify({"entries": activity.recent(limit=limit, after=after, language=language)})
+
+    @app.post("/api/log/clear")
+    def activity_log_clear():
+        activity.clear()
+        return jsonify({"ok": True})
 
     @app.get("/api/health")
     def health():

@@ -85,3 +85,12 @@ def is_direct_http_candidate(url: str) -> bool:
         return False
     lower = url.lower()
     return not any(fragment in lower for fragment in YOUTUBE_HOST_FRAGMENTS)
+
+
+def format_bytes(value) -> str:
+    """Human-readable size/speed, e.g. 4.8 MB."""
+    size = float(value or 0)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024

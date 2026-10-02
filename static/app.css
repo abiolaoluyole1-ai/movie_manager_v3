@@ -127,9 +127,12 @@ label{cursor:pointer}
 .activity-actions{display:flex;align-items:center;justify-content:space-between;gap:12px}.activity-actions p{margin:0;color:var(--muted);font-size:12px}
 .activity-head{display:flex;justify-content:space-between;align-items:center}
 .text-btn{border:0;background:transparent;color:var(--red);font-weight:750;min-height:36px}
-.activity-log{height:220px;overflow:auto;margin-top:8px;border-top:1px solid var(--line);padding-top:8px}
+.activity-log{height:260px;overflow-y:auto;overscroll-behavior:contain;margin-top:8px;border-top:1px solid var(--line);padding-top:8px;font-variant-numeric:tabular-nums}
 .log-line{font-size:12px;padding:7px 2px;border-bottom:1px dashed rgba(20,20,20,.05);display:flex;gap:8px}
-.log-time{color:#9b9fa8}
+.log-time{color:#9b9fa8;flex:none}.log-text{min-width:0;overflow-wrap:anywhere}
+.log-warn{color:#a15c00}.log-dim{color:var(--muted)}
+.live-log-panel{margin-top:14px}.live-log-panel .panel-head{margin-bottom:6px}
+.log-diagnostics{font-size:12px;color:var(--muted);padding:2px 0 6px}
 .log-good{color:var(--ok)}
 .log-bad{color:var(--red)}
 

@@ -13,12 +13,12 @@ from .db import (
     get_setting, get_latest_job, get_latest_source_query, movie_exists, save_search_state,
     set_provider_cache_entry, update_job, upsert_movie, upsert_movie_with_target_guard,
 )
-from .content_rules import find_blocked_term, find_compilation_phrase, is_yoruba_candidate
-from .events import events
+from .content_rules import find_blocked_term, find_compilation_phrase, is_language_candidate
+from .events import activity, events, redact_secrets
 from .internet_archive import ARCHIVE_NETWORK_RETRY_SECONDS, InternetArchiveError, InternetArchiveProvider
-from .language_profiles import PROFILES
+from .language_profiles import PROFILES, build_search_plans
 from .source_adapters import resolver
-from .utils import parse_iso8601_duration, normalise_title
+from .utils import format_duration, parse_iso8601_duration, normalise_title
 
 DISCOVERY_PROVIDERS = {"youtube"}
 
@@ -26,6 +26,10 @@ SEARCH_URL = "https://www.googleapis.com/youtube/v3/search"
 VIDEOS_URL = "https://www.googleapis.com/youtube/v3/videos"
 ACCEPTED_STATUSES = ["ACCEPTED", "QUEUED", "DOWNLOADING", "DOWNLOADED"]
 TEMPORARY_API_STATUSES = {429, 500, 502, 503, 504}
+# YouTube itself stops paging after roughly 10 pages (~500 results); this only guards
+# against a misbehaving token chain looping forever.
+MAX_PAGES_PER_PLAN = 15
+QUOTA_REASONS = {"quotaexceeded", "dailylimitexceeded", "ratelimitexceeded", "userratelimitexceeded"}
 logger = logging.getLogger(__name__)
 
 
@@ -62,6 +66,38 @@ def _api_error(response):
     reason = errors[0].get("reason", "") if errors else ""
     message = error.get("message") or "The request was rejected by YouTube."
     return reason, message
+
+
+def _friendly_error(exc):
+    """A human-readable reason for the Live Log / status line."""
+    if isinstance(exc, YouTubeAPIError) and (exc.reason or "").lower() in QUOTA_REASONS:
+        return (
+            "YouTube's daily search quota is used up. Discovery can continue once the quota "
+            "resets (midnight Pacific Time). Everything found so far is saved."
+        )
+    return redact_secrets(str(exc) or exc.__class__.__name__)
+
+
+def _result_line(result, movie):
+    """(level, text) for one evaluated candidate in the Live Log."""
+    title = movie.get("title") or movie.get("video_id")
+    minutes = int(movie.get("duration_seconds") or 0) // 60
+    reason = movie.get("rejection_reason") or ""
+    if result == "ACCEPTED":
+        return "good", f"✓ Accepted: {title} — {format_duration(movie.get('duration_seconds'))}"
+    if result == "TARGET_REACHED":
+        return "info", f"Target already reached, kept for later: {title}"
+    if result == "UNDER_DURATION":
+        return "dim", f"✕ Too short ({minutes}m): {title}"
+    if result == "WRONG_LANGUAGE":
+        return "dim", f"✕ Wrong language: {title}"
+    if result == "DUPLICATE":
+        return "dim", f"✕ Duplicate: {title}"
+    if reason.startswith("BLOCKED_TERM:"):
+        return "dim", f"✕ Rejected ({reason.split(':', 1)[1]}): {title}"
+    if reason.startswith("COMPILATION_"):
+        return "dim", f"✕ Rejected (compilation): {title}"
+    return "dim", f"✕ Rejected: {title}"
 
 
 class DiscoveryController:
@@ -121,14 +157,31 @@ class DiscoveryController:
         stats["provider"] = self.provider
         return stats
 
+    def _log(self, message, level="info"):
+        activity.add(message, level, scope="discovery", language=self.language)
+
     def restore_latest(self, language):
-        """Restore the last discovery run when this process has no active worker."""
+        """Show `language`'s own last discovery run when no worker is active.
+
+        The newest job is used even if it did little work: skipping "empty"
+        jobs used to make a run that had just finished get replaced by some
+        older job's status and counters on the next refresh. A language with no
+        history at all starts from a clean idle state, never another
+        language's numbers.
+        """
         with self._lock:
             if self._thread and self._thread.is_alive():
                 return self.snapshot()
 
-            job = get_latest_job("DISCOVERY", language, require_activity=True)
+            job = get_latest_job("DISCOVERY", language)
             if not job:
+                self.language = language
+                self.stats = self._fresh_stats()
+                self.status = "IDLE"
+                self.current_query = ""
+                self.message = ""
+                self.job_id = None
+                self.network_wait = False
                 return self.snapshot()
 
             restored = self._fresh_stats()
@@ -154,6 +207,7 @@ class DiscoveryController:
                     self.target = target
                     self._pause.clear()
                     self.status = "RUNNING"
+                    self._log("Discovery resumed.", "good")
                     events.emit("discovery_status", self.snapshot())
                     return
                 raise RuntimeError("Discovery is already running.")
@@ -176,8 +230,11 @@ class DiscoveryController:
                 self.target = max(1, int(target))
                 self.language = language
                 self.status = "COMPLETED"
-                if not self.message:
-                    self.message = f"Target already satisfied: {accepted_now}/{self.target}"
+                self.message = f"Target already satisfied: {accepted_now}/{self.target}"
+                self._log(
+                    f"{PROFILES[language]['label']} target already reached: {accepted_now} / {self.target}. "
+                    "Raise the target to find more.", "info",
+                )
                 events.emit("discovery_status", self.snapshot())
                 return
             self.status = "RUNNING"
@@ -196,6 +253,7 @@ class DiscoveryController:
                 self._pause.set()
                 self.status = "PAUSED"
                 self.message = "Paused by user."
+                self._log("Discovery paused.", "warn")
                 if self.job_id:
                     update_job(self.job_id, status="PAUSED", stats=self._job_stats(), message=self.message)
                 events.emit("discovery_status", self.snapshot())
@@ -206,6 +264,7 @@ class DiscoveryController:
                 self._pause.clear()
                 self.status = "RUNNING"
                 self.message = "Resumed."
+                self._log("Discovery resumed.", "good")
                 if self.job_id:
                     update_job(self.job_id, status="RUNNING", stats=self._job_stats(), message=self.message)
                 events.emit("discovery_status", self.snapshot())
@@ -214,7 +273,7 @@ class DiscoveryController:
         self._stop.set()
         self._pause.clear()
         with self._lock:
-            if self.status not in {"IDLE", "COMPLETED"}:
+            if self.status in {"RUNNING", "PAUSED"}:
                 self.status = "STOPPING"
                 self.message = "Stopping safely..."
                 self.network_wait = False
@@ -253,7 +312,10 @@ class DiscoveryController:
                     self.stats["network_retries"] += 1
                     self.message = f"Network/API unavailable. Retrying automatically in {delay}s..."
                     self.network_wait = True
-                events.emit("network_wait", {"scope": "discovery", "delay": delay, "error": str(exc)})
+                reason = redact_secrets(exc)
+                logger.warning("YouTube request failed, retrying in %ss: %s", delay, reason)
+                self._log(f"Network or YouTube problem. Retrying automatically in {delay}s...", "warn")
+                events.emit("network_wait", {"scope": "discovery", "delay": delay, "error": reason})
                 events.emit("discovery_status", self.snapshot())
                 for _ in range(delay * 4):
                     if self._stop.is_set():
@@ -390,8 +452,8 @@ class DiscoveryController:
             movie["rejection_reason"] = "UNDER_60_MINUTES"
             return movie, "UNDER_DURATION"
 
-        if self.language == "yoruba" and not is_yoruba_candidate(
-            snippet.get("defaultAudioLanguage") or "", snippet.get("defaultLanguage") or "",
+        if not is_language_candidate(
+            self.language, snippet.get("defaultAudioLanguage") or "", snippet.get("defaultLanguage") or "",
             title, description, snippet.get("channelTitle"), query,
         ):
             movie["status"] = "REJECTED"
@@ -434,12 +496,27 @@ class DiscoveryController:
                 with self._lock:
                     self.status = "STOPPED"
                     self.message = "Stopped safely. Existing progress is saved."
+                self._log(
+                    f"Discovery stopped. Progress is saved: {self._target_progress_count()} / {self.target}.",
+                    "warn",
+                )
+            elif self.status == "RUNNING":
+                # Never fall back to an unexplained idle state.
+                with self._lock:
+                    self.status = "ERROR"
+                    self.message = "Discovery ended unexpectedly without a result. Please try again."
+                self._log(self.message, "bad")
 
         except Exception as exc:
+            # Never swallow a worker failure: full traceback to the terminal/log
+            # file, plain-English reason to the Live Log and status line.
+            logger.exception("Discovery worker crashed (language=%s)", self.language)
+            message = _friendly_error(exc)
             with self._lock:
                 self.status = "ERROR"
-                self.message = str(exc)
-            events.emit("error", {"scope": "discovery", "message": str(exc)})
+                self.message = message
+            self._log(f"Discovery stopped by an error: {message}", "bad")
+            events.emit("error", {"scope": "discovery", "message": message})
         finally:
             with self._lock:
                 self.network_wait = False
@@ -447,14 +524,111 @@ class DiscoveryController:
                 update_job(self.job_id, status=self.status, stats=self._job_stats(), message=self.message)
             events.emit("discovery_status", self.snapshot())
 
+    def _search_params(self, key, profile, plan, token):
+        params = {
+            "part": "snippet",
+            "type": "video",
+            "maxResults": 50,
+            "q": plan["query"],
+            "regionCode": profile["region_code"],
+            "videoDuration": "long",
+            "safeSearch": "moderate",
+            "key": key,
+        }
+        if profile.get("relevance_language"):
+            params["relevanceLanguage"] = profile["relevance_language"]
+        params.update(plan["params"])
+        if token:
+            params["pageToken"] = token
+        return params
+
+    def _process_page(self, plan, payload, min_seconds):
+        """Evaluate one page of search results. Returns (accepted_here, finished).
+
+        `finished` is False when the page was cut short (target reached or
+        stop requested), so the caller keeps the same page position instead of
+        skipping the candidates that were never looked at.
+        """
+        query = plan["query"]
+        items = payload.get("items", [])
+        ids = [i.get("id", {}).get("videoId") for i in items if i.get("id", {}).get("videoId")]
+        new_ids = [vid for vid in ids if not movie_exists(self.language, vid)]
+        existing_count = len(ids) - len(new_ids)
+        with self._lock:
+            self.stats["duplicates_skipped"] += existing_count
+            self.stats["candidates_scanned"] += len(ids)
+
+        if ids:
+            self._log(
+                f"Scanned {len(ids)} results: {existing_count} already in your catalogue, "
+                f"{len(new_ids)} new to check."
+            )
+        else:
+            self._log("This search returned no results.")
+
+        accepted_here = rejected_here = 0
+        finished = True
+        details = self._fetch_details(new_ids)
+        for item in details:
+            if self._stop.is_set() or self._target_progress_count() >= self.target:
+                finished = False
+                break
+            self._wait_if_paused()
+            movie, result = self._evaluate(item, query, min_seconds)
+
+            if result == "ACCEPTED":
+                # Atomically re-checks accepted (or downloadable, in
+                # downloadable-only mode) count against target at write
+                # time, so a concurrent writer -- another thread in this
+                # process, or a separate process -- can never push the
+                # total past target.
+                movie, result = self._accept_and_resolve(movie, result)
+            else:
+                upsert_movie(movie)
+
+            self._record_result(result)
+            if result == "ACCEPTED":
+                accepted_here += 1
+            elif result != "TARGET_REACHED":
+                rejected_here += 1
+            level, line = _result_line(result, movie)
+            self._log(line, level)
+
+            events.emit("movie_processed", {
+                "result": result,
+                "movie": movie,
+                "stats": dict(self.stats),
+                "target": self.target,
+            })
+
+        if accepted_here:
+            self._log(
+                f"This page: {accepted_here} accepted, {rejected_here} rejected, "
+                f"{existing_count} already known.", "good",
+            )
+        elif finished:
+            self._log(
+                f"No new movies from this page ({existing_count} already known, {rejected_here} rejected). "
+                "Moving to the next search..."
+            )
+        return accepted_here, finished
+
     def _run_youtube(self):
         key = os.getenv("YOUTUBE_API_KEY", "").strip()
         if not key or key == "PASTE_YOUR_PRIVATE_KEY_HERE":
             raise RuntimeError("YouTube API key is missing. Add it to the .env file.")
 
         profile = PROFILES[self.language]
+        label = profile["label"]
         min_seconds = 60 * 60
+        plans = build_search_plans(self.language)
+        self._log(
+            f"{label} discovery started: {self._target_progress_count()} of {self.target} in your "
+            f"catalogue, {len(plans)} search strategies available."
+        )
 
+        search_pass = 0
+        plan_pages = {}
         while not self._stop.is_set():
             accepted_now = count_movies(self.language, ACCEPTED_STATUSES)
             progress_now = self._target_progress_count()
@@ -463,105 +637,96 @@ class DiscoveryController:
             if progress_now >= self.target:
                 with self._lock:
                     self.status = "COMPLETED"
-                    self.message = f"Target reached: {progress_now}/{self.target}"
+                    self.message = f"Discovery complete: {progress_now} / {self.target}"
+                self._log(self.message, "good")
                 break
 
-            progressed = False
-            for query in profile["queries"]:
+            search_pass += 1
+            pages_searched = pass_accepted = 0
+            if search_pass > 1:
+                self._log(f"Starting search pass {search_pass} with the strategies that still have more pages...")
+
+            for plan in plans:
                 if self._stop.is_set():
                     break
                 self._wait_if_paused()
                 if self._target_progress_count() >= self.target:
                     break
 
-                token, exhausted = get_search_state(self.language, query)
+                token, exhausted = get_search_state(self.language, plan["key"])
                 if exhausted:
                     continue
 
                 with self._lock:
-                    self.current_query = query
-                    self.message = f"Searching: {query}"
+                    self.current_query = plan["label"]
+                    self.message = f"Searching: {plan['label']}"
+                self._log(
+                    f"Searching YouTube for {label} movies: {plan['label']}"
+                    + (" — next page" if token else "")
+                )
                 events.emit("discovery_status", self.snapshot())
 
-                params = {
-                    "part": "snippet",
-                    "type": "video",
-                    "maxResults": 50,
-                    "q": query,
-                    "regionCode": profile["region_code"],
-                    "videoDuration": "long",
-                    "safeSearch": "moderate",
-                    "key": key,
-                }
-                if profile.get("relevance_language"):
-                    params["relevanceLanguage"] = profile["relevance_language"]
-                if token:
-                    params["pageToken"] = token
-
-                response = self._search(params)
+                try:
+                    response = self._search(self._search_params(key, profile, plan, token))
+                except YouTubeAPIError as exc:
+                    if token and exc.status_code == 400 and "pagetoken" in (exc.reason or "").lower():
+                        self._log(
+                            f"The saved page position for \"{plan['label']}\" is no longer valid. "
+                            "Marking that search as finished.", "warn",
+                        )
+                        save_search_state(self.language, plan["key"], None, True)
+                        continue
+                    raise
                 if response is None:
                     break
+                pages_searched += 1
+
                 payload = response.json()
-                progressed = True
-                items = payload.get("items", [])
-                ids = [
-                    i.get("id", {}).get("videoId")
-                    for i in items
-                    if i.get("id", {}).get("videoId")
-                ]
-
-                new_ids = [vid for vid in ids if not movie_exists(self.language, vid)]
-                existing_count = len(ids) - len(new_ids)
-                with self._lock:
-                    self.stats["duplicates_skipped"] += existing_count
-                    self.stats["candidates_scanned"] += len(ids)
-
-                details = self._fetch_details(new_ids)
-                for item in details:
-                    if self._stop.is_set():
-                        break
-                    self._wait_if_paused()
-                    movie, result = self._evaluate(item, query, min_seconds)
-
-                    if result == "ACCEPTED":
-                        # Atomically re-checks accepted (or downloadable, in
-                        # downloadable-only mode) count against target at write
-                        # time, so a concurrent writer -- another thread in this
-                        # process, or a separate process -- can never push the
-                        # total past target.
-                        movie, result = self._accept_and_resolve(movie, result)
-                    else:
-                        upsert_movie(movie)
-                    progressed = True
-
-                    self._record_result(result)
-
-                    events.emit("movie_processed", {
-                        "result": result,
-                        "movie": movie,
-                        "stats": dict(self.stats),
-                        "target": self.target,
-                    })
-
-                    if self._target_progress_count() >= self.target:
-                        break
+                accepted_here, finished = self._process_page(plan, payload, min_seconds)
+                pass_accepted += accepted_here
 
                 next_token = payload.get("nextPageToken")
-                save_search_state(self.language, query, next_token, not bool(next_token))
+                plan_pages[plan["key"]] = plan_pages.get(plan["key"], 0) + 1
+                if plan_pages[plan["key"]] >= MAX_PAGES_PER_PLAN:
+                    next_token = None
+                if finished:
+                    save_search_state(self.language, plan["key"], next_token, not bool(next_token))
+                    if not next_token:
+                        self._log(f"Search finished, no more pages: {plan['label']}")
+                else:
+                    # Keep the page we were on; its unchecked candidates are
+                    # looked at first on the next run.
+                    save_search_state(self.language, plan["key"], token, False)
                 if self.job_id:
                     update_job(self.job_id, stats=self._job_stats(), message=self.message)
 
-            if self._target_progress_count() >= self.target:
+            if self._stop.is_set() or self._target_progress_count() >= self.target:
                 continue
 
-            if not progressed:
+            if pages_searched == 0:
+                progress_now = self._target_progress_count()
                 with self._lock:
-                    self.status = "COMPLETED"
+                    stats = dict(self.stats)
+                    self.status = "EXHAUSTED"
                     self.message = (
-                        "Search sources are exhausted before the target was reached. "
-                        "Reset search state or add more search terms later."
+                        f"Search pool exhausted. Found {progress_now} of {self.target}. "
+                        "No additional unique qualifying movies were found."
                     )
+                self._log(self.message, "warn")
+                rejected = (
+                    stats["rejected_under_duration"] + stats["rejected_not_movie"]
+                    + stats["rejected_wrong_language"]
+                )
+                self._log(
+                    f"This run checked {stats['candidates_scanned']} results: "
+                    f"{stats['duplicates_skipped']} already known, {rejected} rejected.", "warn",
+                )
                 break
+
+            self._log(
+                f"Search pass {search_pass} done: {pass_accepted} new, "
+                f"{self._target_progress_count()} / {self.target} in your catalogue."
+            )
 
     def _archive_request(self, func, *args, max_attempts=4, **kwargs):
         """Calls an InternetArchiveProvider method with a bounded retry/

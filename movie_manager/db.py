@@ -4,6 +4,7 @@ import threading
 from datetime import datetime, timezone
 
 from .config import DB_PATH, DEFAULTS
+from .language_profiles import DEFAULT_TARGET
 
 _lock = threading.RLock()
 
@@ -145,6 +146,14 @@ def set_setting(key, value):
 def all_settings():
     with connect() as conn:
         return {row["key"]: row["value"] for row in conn.execute("SELECT key,value FROM settings")}
+
+
+def get_language_target(language):
+    """The saved catalogue target for one language (each language has its own)."""
+    try:
+        return max(1, int(get_setting(f"target:{language}", DEFAULT_TARGET)))
+    except (TypeError, ValueError):
+        return DEFAULT_TARGET
 
 
 def get_search_state(language, query):

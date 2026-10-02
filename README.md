@@ -8,7 +8,8 @@ Local Windows dashboard for discovering and managing long-form Yoruba movie cand
 - `Start Movie Manager.bat` launcher.
 - Red/white glassmorphism dashboard.
 - Dashboard / Movies / Downloads / Settings.
-- Yoruba enabled now; Igbo and Hausa reserved for later.
+- Yoruba, Igbo and Hausa each have their own catalogue, target, search history and download folder; pick one in the Language dropdown.
+- Dashboard Live Log shows discovery and download activity as it happens (also saved to `data/logs/movie-manager.log`).
 - Any target number.
 - Real duration check: accepted videos must be **60 minutes or longer**.
 - Reject obvious trailers, clips, interviews, reviews, music, BTS, episodes and promos.

@@ -6,7 +6,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from movie_manager.db import (
-    all_video_ids, init_db, get_setting, set_setting, count_movies, reset_interrupted_downloads,
+    all_video_ids, init_db, get_language_target, get_setting, set_setting, count_movies,
+    reset_interrupted_downloads,
 )
 from movie_manager.runtime import runtime
 from movie_manager.source_mappings import import_mapping_entries, parse_csv_mapping, parse_json_mapping
@@ -40,7 +41,7 @@ def main():
         print("Database initialised.")
     elif args.command == "status":
         language = get_setting("active_language", "yoruba")
-        target = int(get_setting(f"target:{language}", "30"))
+        target = get_language_target(language)
         print(f"Language: {language}")
         print(f"Target: {target}")
         print(f"Accepted: {count_movies(language, statuses=['ACCEPTED','QUEUED','DOWNLOADING','DOWNLOADED'])}")
@@ -54,7 +55,7 @@ def main():
         if args.wait:
             import time
             try:
-                while runtime.snapshot()["discovery_status"] not in {"COMPLETED", "STOPPED", "ERROR"}:
+                while runtime.snapshot()["discovery_status"] not in {"COMPLETED", "EXHAUSTED", "STOPPED", "ERROR"}:
                     print(runtime.snapshot())
                     time.sleep(2)
             except KeyboardInterrupt:

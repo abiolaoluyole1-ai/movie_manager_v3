@@ -1,3 +1,4 @@
+import logging
 import os
 import threading
 import time
@@ -12,8 +13,11 @@ from .config import (
     clamp_min_free_disk_gb, clamp_youtube_browser, is_youtube_blocked_error,
 )
 from .db import get_setting, next_download_ready, set_setting, update_download
-from .events import events
-from .utils import extension_from_url, free_disk_space_gb, safe_filename, is_http_url
+from .events import activity, events, redact_secrets
+from .language_profiles import language_folder
+from .utils import extension_from_url, format_bytes, free_disk_space_gb, safe_filename, is_http_url
+
+logger = logging.getLogger(__name__)
 
 
 class YtDlpDownloadBackend:
@@ -55,6 +59,7 @@ class YtDlpDownloadBackend:
                                             total_bytes=total, speed_bps=speed, eta_seconds=eta)
                 events.emit("download_progress", {"movie_id": movie["id"], "bytes_downloaded": done,
                     "total_bytes": total, "speed_bps": speed, "eta_seconds": eta})
+                self.controller._log_progress(movie, done, total, speed)
             elif state == "postprocessing":
                 self.controller._update_job(movie, worker_id, stage="MERGING")
 
@@ -142,6 +147,22 @@ class DownloadController:
         self.disk_low = False
         self._youtube_blocked_until = 0.0
         self.active = {}
+        self._logged_pct = {}
+
+    def _log(self, message, level="info", movie=None):
+        activity.add(message, level, scope="download", language=(movie or {}).get("language") or self.language)
+
+    def _log_progress(self, movie, done, total, speed):
+        """One Live Log line per 10% step, so a long download never floods the log."""
+        if not total:
+            return
+        bucket = int(min(100, (done or 0) / total * 100) // 10) * 10
+        with self._lock:
+            if bucket < 10 or bucket <= self._logged_pct.get(movie["id"], -1):
+                return
+            self._logged_pct[movie["id"]] = bucket
+        speed_text = f" — {format_bytes(speed)}/s" if speed else ""
+        self._log(f"↓ {movie['title']} — {bucket}%{speed_text}", movie=movie)
 
     def snapshot(self):
         with self._lock:
@@ -166,6 +187,13 @@ class DownloadController:
             concurrency = max(CONCURRENCY_MIN, min(CONCURRENCY_MAX, int(concurrency)))
 
             if any(w.is_alive() for w in self._workers):
+                if language != self.language:
+                    if self.active:
+                        raise RuntimeError(
+                            f"{self.language.capitalize()} downloads are still running. "
+                            "Stop them before downloading another language."
+                        )
+                    self.language = language
                 self.set_concurrency(concurrency)
                 if self.status == "PAUSED":
                     self._pause.clear()
@@ -187,6 +215,7 @@ class DownloadController:
             self._pause.clear()
             self.status = "RUNNING"
             self.message = f"Download workers started ({concurrency})."
+            self._log(f"Downloads started for {language_folder(language)} ({concurrency} at a time).")
             self.network_wait = False
             self.disk_low = False
             self.active = {}
@@ -205,6 +234,7 @@ class DownloadController:
         with self._lock:
             self.status = "PAUSED"
             self.message = "Downloads paused by user."
+        self._log("Downloads paused.", "warn")
         events.emit("download_status", self.snapshot())
 
     def resume(self):
@@ -212,6 +242,7 @@ class DownloadController:
         with self._lock:
             self.status = "RUNNING"
             self.message = "Downloads resumed."
+        self._log("Downloads resumed.", "good")
         events.emit("download_status", self.snapshot())
 
     def stop(self):
@@ -221,6 +252,7 @@ class DownloadController:
             self.status = "STOPPING"
             self.message = "Stopping download workers..."
             self.network_wait = False
+        self._log("Stopping downloads...", "warn")
         events.emit("download_status", self.snapshot())
 
     def _wait_if_paused(self):
@@ -287,7 +319,7 @@ class DownloadController:
 
     def _output_paths(self, movie):
         root = Path(get_setting("download_root"))
-        folder = root / movie["language"].capitalize()
+        folder = root / language_folder(movie["language"])
         folder.mkdir(parents=True, exist_ok=True)
         ext = ".mp4" if movie.get("download_backend") == "YTDLP" else extension_from_url(movie["download_url"])
         filename = safe_filename(movie["title"]) + ext
@@ -317,6 +349,7 @@ class DownloadController:
                 self.disk_low = True
                 self.status = "DISK_LOW"
                 self.message = "Downloads paused: low disk space. Free up space to continue."
+                self._log(self.message, "bad")
                 events.emit("download_status", self.snapshot())
 
     def _leave_disk_low(self):
@@ -326,6 +359,7 @@ class DownloadController:
                 if not self._pause.is_set() and not self._stop.is_set():
                     self.status = "RUNNING"
                     self.message = "Disk space recovered. Resuming downloads."
+                    self._log(self.message, "good")
                 events.emit("download_status", self.snapshot())
 
     def _download_one(self, movie, worker_id):
@@ -413,6 +447,7 @@ class DownloadController:
                                         "movie_id": movie["id"], "bytes_downloaded": downloaded,
                                         "total_bytes": total, "speed_bps": speed, "eta_seconds": eta,
                                     })
+                                    self._log_progress(movie, downloaded, total, speed)
                                     last_emit = now
 
                         self._update_job(movie, worker_id, stage="VERIFYING")
@@ -428,6 +463,7 @@ class DownloadController:
                             download_speed_bps=0, download_eta_seconds=0, download_error=None,
                         )
                         events.emit("download_complete", {"movie_id": movie["id"], "file_path": str(final)})
+                        self._log(f"✓ {movie['title']} completed", "good", movie)
                         completed = True
                         return
 
@@ -442,9 +478,13 @@ class DownloadController:
                     with self._lock:
                         self.message = f"Network/source interrupted. Retrying automatically in {delay}s."
                         self.network_wait = True
+                    logger.warning("Download interrupted for %r, retrying in %ss: %s",
+                                   movie["title"], delay, redact_secrets(exc))
+                    self._log(f"Connection problem while downloading {movie['title']}. "
+                              f"Retrying automatically in {delay}s...", "warn", movie)
                     events.emit("network_wait", {
                         "scope": "download", "movie_id": movie["id"],
-                        "delay": delay, "error": str(exc),
+                        "delay": delay, "error": redact_secrets(exc),
                     })
                     events.emit("download_status", self.snapshot())
                     for _ in range(delay * 4):
@@ -457,7 +497,9 @@ class DownloadController:
                         movie["id"], download_status="FAILED", status="ACCEPTED",
                         download_error=str(exc), retry_count=attempt,
                     )
-                    events.emit("error", {"scope": "download", "movie_id": movie["id"], "message": str(exc)})
+                    logger.error("Download failed for %r: %s", movie["title"], redact_secrets(exc))
+                    self._log(f"✕ {movie['title']} could not download: {redact_secrets(exc)}", "bad", movie)
+                    events.emit("error", {"scope": "download", "movie_id": movie["id"], "message": redact_secrets(exc)})
                     return
         finally:
             if not completed and self._stop.is_set():
@@ -474,6 +516,7 @@ class DownloadController:
             update_download(movie["id"], download_status="DOWNLOADED", status="DOWNLOADED", file_path=str(final),
                 bytes_downloaded=actual, total_bytes=actual, download_speed_bps=0, download_eta_seconds=0, download_error=None)
             events.emit("download_complete", {"movie_id": movie["id"], "file_path": str(final)})
+            self._log(f"✓ {movie['title']} completed", "good", movie)
         except Exception as exc:
             if self._stop.is_set():
                 update_download(movie["id"], download_status="READY", status="ACCEPTED")
@@ -482,10 +525,14 @@ class DownloadController:
                 self._start_youtube_cooldown()
                 update_download(movie["id"], download_status="FAILED", status="ACCEPTED",
                                  download_error=YOUTUBE_BLOCKED_MESSAGE)
+                self._log(f"⚠ {YOUTUBE_BLOCKED_MESSAGE}", "warn", movie)
                 events.emit("error", {"scope": "download", "movie_id": movie["id"],
                                        "message": YOUTUBE_BLOCKED_MESSAGE, "blocked": True})
                 return
+            logger.error("YouTube download failed for %r: %s", movie["title"], redact_secrets(exc))
             update_download(movie["id"], download_status="FAILED", status="ACCEPTED", download_error=str(exc))
+            reason = redact_secrets(str(exc).splitlines()[0] if str(exc) else exc.__class__.__name__)
+            self._log(f"✕ {movie['title']} could not download: {reason}", "bad", movie)
             events.emit("error", {"scope": "download", "movie_id": movie["id"], "message": str(exc)})
 
     def _update_job(self, movie, worker_id, **fields):
@@ -498,6 +545,7 @@ class DownloadController:
             new_stage = job.get("stage")
         if "stage" in fields and new_stage != prev_stage and new_stage in {"MERGING", "VERIFYING"}:
             events.emit("download_stage", {"movie_id": movie["id"], "title": movie.get("title"), "stage": new_stage})
+            self._log("Combining video and audio..." if new_stage == "MERGING" else "Checking movie...", movie=movie)
 
     def _run(self, worker_id=0):
         try:
@@ -548,21 +596,26 @@ class DownloadController:
                     self.message = f"Downloading: {movie['title']}"
                     self.active[movie["id"]] = {
                         "movie_id": movie["id"], "worker_id": worker_id, "title": movie["title"],
+                        "language": movie["language"],
                         "stage": "QUEUED", "bytes_downloaded": 0, "total_bytes": None,
                         "speed_bps": 0, "eta_seconds": None, "retries": int(movie.get("retry_count") or 0),
                     }
+                self._log(f"↓ Starting {movie['title']}", movie=movie)
                 events.emit("download_status", self.snapshot())
                 try:
                     self._download_one(movie, worker_id)
                 finally:
                     with self._lock:
                         self.active.pop(movie["id"], None)
+                        self._logged_pct.pop(movie["id"], None)
         except Exception as exc:
+            logger.exception("Download worker %s crashed", worker_id)
             with self._lock:
                 self.status = "ERROR"
-                self.message = str(exc)
+                self.message = redact_secrets(exc)
             self._stop.set()
-            events.emit("error", {"scope": "download", "message": str(exc)})
+            self._log(f"Downloads stopped by an error: {redact_secrets(exc)}", "bad")
+            events.emit("error", {"scope": "download", "message": redact_secrets(exc)})
         finally:
             with self._lock:
                 still_running = any(
@@ -574,4 +627,5 @@ class DownloadController:
                     if self._stop.is_set() and self.status != "ERROR":
                         self.status = "STOPPED"
                         self.message = "Download workers stopped safely."
+                        self._log("Downloads stopped. Unfinished movies resume next time.", "warn")
             events.emit("download_status", self.snapshot())

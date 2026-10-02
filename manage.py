@@ -25,6 +25,10 @@ def main():
     d.add_argument("--language", default="yoruba")
     d.add_argument("--wait", action="store_true")
 
+    r = sub.add_parser("recheck", help="Re-judge earlier rule-based rejections with the current rules (dry run unless --apply).")
+    r.add_argument("--language", required=True)
+    r.add_argument("--apply", action="store_true")
+
     sub.add_parser("pause")
     sub.add_parser("resume")
     sub.add_parser("stop")
@@ -61,6 +65,17 @@ def main():
             except KeyboardInterrupt:
                 runtime.pause_discovery()
                 print("Paused.")
+    elif args.command == "recheck":
+        from movie_manager.recheck import recheck_rule_rejections
+        outcome = recheck_rule_rejections(args.language, apply=args.apply)
+        print(f"Checked {outcome['checked']} rule-rejected {args.language} movies: "
+              f"{len(outcome['would_accept'])} pass the current rules, {outcome['still_rejected']} stay rejected.")
+        for movie in outcome["would_accept"][:15]:
+            print(f"  + {movie['title']}")
+        if args.apply:
+            print(f"Returned to the catalogue: {outcome['accepted']} (held back by the target: {outcome['blocked_by_target']}).")
+        else:
+            print("Dry run only. Nothing was changed. Add --apply to return them to the catalogue.")
     elif args.command == "pause":
         runtime.pause_discovery()
         print("Pause requested.")

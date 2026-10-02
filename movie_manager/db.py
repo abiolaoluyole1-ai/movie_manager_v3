@@ -774,6 +774,48 @@ def get_latest_source_query(language):
         return row["source_query"] if row else ""
 
 
+_RULE_REJECTION_SQL = (
+    "(rejection_reason LIKE 'BLOCKED_TERM:%' OR rejection_reason LIKE 'BLOCKED_DESCRIPTION:%' "
+    "OR rejection_reason LIKE 'COMPILATION_%')"
+)
+
+
+def list_rule_rejections(language):
+    """Movies rejected by the content rules themselves (never a user decision)."""
+    with connect() as conn:
+        rows = conn.execute(
+            f"SELECT * FROM movies WHERE language=? AND status='REJECTED' AND {_RULE_REJECTION_SQL} ORDER BY id",
+            (language,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def reaccept_rule_rejection(movie_id, language, accepted_statuses, target):
+    """Atomically return one rule-rejected movie to the catalogue, never past `target`."""
+    placeholders = ",".join("?" for _ in accepted_statuses)
+    with _lock, connect() as conn:
+        conn.isolation_level = None
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            current = conn.execute(
+                f"SELECT COUNT(*) FROM movies WHERE language=? AND status IN ({placeholders})",
+                [language, *accepted_statuses],
+            ).fetchone()[0]
+            if current >= target:
+                conn.rollback()
+                return False
+            cur = conn.execute(
+                f"""UPDATE movies SET status='ACCEPTED', rejection_reason=NULL, updated_at=?
+                    WHERE id=? AND language=? AND status='REJECTED' AND {_RULE_REJECTION_SQL}""",
+                (now_iso(), movie_id, language),
+            )
+            conn.commit()
+            return cur.rowcount == 1
+        except Exception:
+            conn.rollback()
+            raise
+
+
 def reject_movie(movie_id, reason="USER_REJECTED"):
     with _lock, connect() as conn:
         row = conn.execute("SELECT language,video_id FROM movies WHERE id=?", (movie_id,)).fetchone()

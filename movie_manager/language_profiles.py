@@ -15,6 +15,9 @@ DEFAULT_TARGET = 1000
 #   description_phrases description evidence (specific phrases, not single words)
 #   channel_keywords    channel-name evidence
 #   query_markers       a search is "language specific" when its text contains one of these
+#   cast_keywords       well-known performers/brands that only make this language's films
+#   whole_word_keywords match keywords as whole words ("igbo" must not fire inside
+#                       the actor names Igboegwu / Igboanugo)
 #   title_noise         look-alike phrases removed from titles before matching keywords
 #   reject_other_language  reject candidates that carry another language's evidence
 #                       (not for Yoruba: "igbo" is the Yoruba word for forest)
@@ -22,6 +25,8 @@ PROFILES = {
     "yoruba": {
         "label": "Yoruba",
         "enabled": True,
+        # The Yoruba goal is complete: its catalogue is never rewritten by re-check tools.
+        "protected": True,
         "folder": "Yoruba",
         "region_code": "NG",
         # YouTube search.list rejects relevanceLanguage=yo with HTTP 400.
@@ -103,6 +108,13 @@ PROFILES = {
             "Igbo language film",
         ],
         "extra_queries": [
+            "new Igbo movie",
+            "Igbo language movie",
+            "Igbo traditional movie",
+            "Igbo village movie",
+            "Igbo epic movie",
+            "Igbo drama",
+            "Igbo comedy movie",
             "Igbo movie full length",
             "Igbo traditional full movie",
             "Igbo epic full movie",
@@ -113,22 +125,35 @@ PROFILES = {
             "Igbo village full movie",
             "Igbo action full movie",
             "Igbo native full movie",
+            "Igbo native language movie",
             "Nigerian Igbo full movie",
             "Nollywood Igbo full movie",
+            "Nollywood Igbo language movie",
             "Igbo blockbuster movie",
+            "Ndi Igbo full movie",
+            "Igbo culture movie",
+            "Igbo masquerade movie",
+            "Igbo king kingdom movie",
+            "Igbo native doctor movie",
+            "Igbo wedding movie",
         ],
-        "window_queries": ["Igbo full movie", "Igbo movie"],
-        "year_from": 2008,
+        "window_queries": ["Igbo full movie", "Igbo movie", "latest Igbo movie"],
+        "year_from": 2012,
         "archive_queries": [],
         "language_tags": ["ig", "ibo", "igbo"],
-        "title_keywords": ["igbo", "ìgbò", "ibo movie", "ibo film"],
+        "whole_word_keywords": True,
+        "title_keywords": [
+            "igbo", "ìgbò", "ndi igbo", "ibo movie", "ibo film", "chief imo", "chiefimo", "chiefimocomedy",
+        ],
         "description_phrases": [
             "igbo movie", "igbo film", "igbo language", "igbo nollywood", "igbo version", "igbo full movie",
+            "igbo epic", "igbo comedy", "igbo drama", "igbo traditional", "igbo native", "igbo culture",
+            "chief imo comedy",
         ],
-        "channel_keywords": ["igbo", "ìgbò"],
+        "channel_keywords": ["igbo", "ìgbò", "chief imo"],
         "query_markers": ["igbo"],
         # "Igbo" is also the Yoruba word for forest/bush.
-        "title_noise": ["igboho", "igbo irunmole", "igbo olodumare", "igbo ora", "igbo-ora", "igbo ikoko"],
+        "title_noise": ["igbo irunmole", "igbo olodumare", "igbo ora", "igbo-ora", "igbo ikoko"],
         "reject_other_language": True,
     },
     "hausa": {
@@ -149,9 +174,19 @@ PROFILES = {
             "Hausa language film",
         ],
         "extra_queries": [
+            "new Hausa movie",
+            "Hausa language movie",
             "Kannywood full movie",
-            "Hausa full film",
             "latest Kannywood movie",
+            "new Kannywood movie",
+            "Hausa drama",
+            "Hausa comedy movie",
+            "Hausa traditional movie",
+            "Hausa full film",
+            "Hausa film full length",
+            "Hausa movie with English subtitles",
+            "complete Hausa film",
+            "original Hausa film",
             "sabon fim Hausa",
             "fim din Hausa",
             "Hausa drama full movie",
@@ -159,19 +194,33 @@ PROFILES = {
             "Hausa action full movie",
             "Hausa comedy full movie",
             "Hausa family full movie",
+            "Hausa epic movie",
             "Hausa Arewa movie",
             "Arewa film full movie",
             "Hausa Nollywood movie",
+            "Kannywood film with English subtitles",
         ],
-        "window_queries": ["Hausa full movie", "Kannywood movie"],
-        "year_from": 2008,
+        "window_queries": ["Hausa full movie", "Kannywood movie", "Hausa film"],
+        "year_from": 2012,
         "archive_queries": [],
         "language_tags": ["ha", "hau", "hausa"],
-        "title_keywords": ["hausa", "kannywood", "sabon fim", "fim din"],
+        "whole_word_keywords": True,
+        "title_keywords": ["hausa", "kannywood", "sabon fim", "fim din", "hausa dub"],
         "description_phrases": [
             "hausa movie", "hausa film", "hausa language", "kannywood", "hausa nollywood", "fim din hausa",
+            "hausa full", "hausa drama", "hausa comedy", "hausa series",
         ],
         "channel_keywords": ["hausa", "kannywood", "arewa"],
+        # Kannywood stars: a film that stars them is a Hausa-language film even when the
+        # title never says "Hausa" (titles are often just a Hausa name plus "Full Movie").
+        "cast_keywords": [
+            "ali nuhu", "adam a zango", "adam zango", "sadiq sani sadiq", "maryam yahaya", "jamila nagudu",
+            "hadiza gabon", "rabi'u rikadawa", "rabiu rikadawa", "momme gombe", "nafisat abdullahi",
+            "aisha aliyu tsamiya", "saratu gidado", "umar m shariff", "yakubu muhammad", "baba ari",
+            "garzali miko", "mansura isah", "hafsat idris", "ado gwanja", "ali artwork", "sani danja",
+            "ibrahim maishinku", "abdul m shareef", "lilin baba", "falalu a dorayi", "mustapha naburaska",
+            "nuhu abdullahi", "fati washa", "samha m inuwa", "teema yola", "aminu saira",
+        ],
         "query_markers": ["hausa", "kannywood", "arewa", "fim"],
         "title_noise": [],
         "reject_other_language": True,
@@ -247,6 +296,34 @@ BLOCKED_TERMS = {
     "review", "reaction", "soundtrack", "music video", "official music",
     "highlights", "making of", "preview", "promo", "episode", "episodes",
 }
+
+# Long uploads that are not movies at all (kids' songs, music mixes, lessons, sermons).
+# Matched as whole words in the TITLE only.
+NON_MOVIE_FORMAT_TERMS = {
+    "nursery rhymes", "nursery rhyme", "cartoon", "cartoons", "lullaby", "lullabies",
+    "children's songs", "kids songs", "gospel songs", "worship songs", "praise songs",
+    "playlist", "mixtape", "tutorial", "alphabet", "sermon",
+}
+
+# A description only counts against a video when it says what THIS video is.
+# Single words ("clip", "promo", "scenes") and tag-style lists ("yoruba movie clips,
+# movie trailer, behind the scenes, movie review") are channel boilerplate that sits
+# under real movies, so they are never enough on their own.
+DESCRIPTION_NON_MOVIE_PHRASES = (
+    "official trailer", "this trailer", "this teaser", "this clip", "this is a clip",
+    "in this interview", "full interview", "interview with", "reaction video", "reacts to",
+    "official music video", "lyric video", "official audio",
+)
+
+# Boilerplate/tag phrases: only meaningful as support when the channel itself posts extracts.
+DESCRIPTION_TAG_PHRASES = (
+    "movie trailer", "teaser trailer", "movie clip", "short clip", "clip from", "clips from",
+    "behind the scenes", "behind-the-scenes", "highlights of", "movie highlights", "movie review",
+    "music video", "movie promo", "promo video", "official promo", "making of",
+)
+
+# Channels that exist to post short extracts rather than whole movies.
+NON_MOVIE_CHANNEL_WORDS = ("clip", "trailer", "highlight", "teaser", "reaction", "review", "promo")
 
 # Titles are reliable indicators for these explicit non-movie formats. Description
 # matching intentionally excludes generic words such as "collection".

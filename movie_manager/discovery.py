@@ -13,7 +13,7 @@ from .db import (
     get_setting, get_latest_job, get_latest_source_query, movie_exists, save_search_state,
     set_provider_cache_entry, update_job, upsert_movie, upsert_movie_with_target_guard,
 )
-from .content_rules import find_blocked_term, find_compilation_phrase, is_language_candidate
+from .content_rules import find_compilation_phrase, find_non_movie_evidence, is_language_candidate
 from .events import activity, events, redact_secrets
 from .internet_archive import ARCHIVE_NETWORK_RETRY_SECONDS, InternetArchiveError, InternetArchiveProvider
 from .language_profiles import PROFILES, build_search_plans
@@ -95,6 +95,8 @@ def _result_line(result, movie):
         return "dim", f"✕ Duplicate: {title}"
     if reason.startswith("BLOCKED_TERM:"):
         return "dim", f"✕ Rejected ({reason.split(':', 1)[1]}): {title}"
+    if reason.startswith("BLOCKED_DESCRIPTION:"):
+        return "dim", f"✕ Rejected (description says \"{reason.split(':', 1)[1]}\"): {title}"
     if reason.startswith("COMPILATION_"):
         return "dim", f"✕ Rejected (compilation): {title}"
     return "dim", f"✕ Rejected: {title}"
@@ -419,7 +421,6 @@ class DiscoveryController:
         title = (snippet.get("title") or "").strip()
         description = (snippet.get("description") or "").strip()
         duration = parse_iso8601_duration(details.get("duration"))
-        lowered = f"{title} {description}".lower()
 
         movie = {
             "language": self.language,
@@ -468,10 +469,13 @@ class DiscoveryController:
             movie["rejection_reason"] = f"COMPILATION_{scope}:{phrase}"
             return movie, "NOT_MOVIE"
 
-        blocked = find_blocked_term(lowered)
-        if blocked:
+        non_movie = find_non_movie_evidence(title, description, duration, snippet.get("channelTitle"))
+        if non_movie:
+            scope, term = non_movie
             movie["status"] = "REJECTED"
-            movie["rejection_reason"] = f"BLOCKED_TERM:{blocked}"
+            movie["rejection_reason"] = (
+                f"BLOCKED_TERM:{term}" if scope == "TITLE" else f"BLOCKED_DESCRIPTION:{term}"
+            )
             return movie, "NOT_MOVIE"
 
         duplicate = find_probable_title_duplicate(
